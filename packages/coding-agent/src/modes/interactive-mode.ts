@@ -8940,7 +8940,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/**
 	 * Set the working row's label; no argument restores the default. A function
-	 * label is live — re-read on every spinner tick — and is kept to one row.
+	 * label is live — re-read on every spinner tick — and is shown in full,
+	 * wrapping onto more lines when it does not fit the terminal width.
 	 */
 	setWorkingMessage(message?: string | (() => string)): void {
 		if (message === undefined) {
@@ -8953,24 +8954,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		if (this.loadingAnimation) {
-			const label = typeof message === "function" ? this.#oneRowWorkingLabel(message) : message;
-			this.loadingAnimation.setMessage(label);
-			this.#workingMessage = label;
+			this.loadingAnimation.setMessage(message);
+			this.#workingMessage = message;
 			return;
 		}
 
 		this.#pendingWorkingMessage = message;
-	}
-
-	/**
-	 * Clamp a live label to the loader row: the terminal width minus the row's
-	 * interrupt glyph, the gap after it and the row's one-column side padding.
-	 */
-	#oneRowWorkingLabel(message: () => string): () => string {
-		return () => {
-			const lead = visibleWidth(` ${appKey(this.keybindings, "app.interrupt")}`) + 1;
-			return truncateToWidth(message(), Math.max(1, this.ui.terminal.columns - lead - 2));
-		};
 	}
 
 	applyPendingWorkingMessage(): void {
