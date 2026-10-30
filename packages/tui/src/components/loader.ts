@@ -1,7 +1,7 @@
 import type { TspProps } from "@oh-my-pi/pi-wire";
 import { formatTooltipKey } from "../key-hint-format";
 import type { KeyId } from "../keys";
-import { elapsed, kbd, keyed, node, row, span, text } from "../native/describe";
+import { col, elapsed, kbd, keyed, node, row, span, text } from "../native/describe";
 import { plainText } from "../native/spans";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { isNativeRendering } from "../native/state";
@@ -20,6 +20,13 @@ const MAX_BACKPRESSURE_FRAME_COST_MS = 200;
 
 /** Native repaint cadence of a retry countdown ring (the terminal eases the ring between frames). */
 const RETRY_METER_REPAINT_MS = 500;
+
+/**
+ * Cells the spinner (or ring), elapsed time, divider and stop control occupy
+ * before the intent. A label that would not fit beside them is drawn in full
+ * on the following lines instead of being ellipsized.
+ */
+const WORKING_ROW_CHROME_COLS = 36;
 
 /** A working-row variant (§6.5): a retry countdown, or context compaction. */
 export type WorkingRowVariant =
@@ -50,6 +57,8 @@ export interface WorkingRowSpec {
  * the elapsed time, the `·` divider, the intent shimmering, a grow spacer,
  * then the stop control whose click sends `interrupt`. Compaction adds an
  * indeterminate `progress` before the stop control; a retry says "Cancel".
+ * An intent that does not fit beside that chrome is wrapped in full underneath
+ * it, instead of ellipsized on the one row.
  */
 export function describeWorkingRow(spec: WorkingRowSpec, cx: DescribeContext, now = Date.now()): NativeNode {
 	const variant = spec.variant;
@@ -61,13 +70,21 @@ export function describeWorkingRow(spec: WorkingRowSpec, cx: DescribeContext, no
 	} else {
 		children.push(node("spinner", { style: "starburst", tone: "accent" }, undefined, "spinner"));
 	}
-	const label = describeShimmer([{ text: spec.label, palette: spec.palette }], "label");
-	children.push(
-		keyed(elapsed(now - spec.startedAt), "elapsed"),
-		node("text", { text: "·", role: "omp.working.sep" }, undefined, "sep"),
-		node(label.k, { ...label.p, role: "omp.working.label" } as TspProps, label.c, label.key),
-		node("row", { grow: 1 }, undefined, "fill"),
-	);
+	const labelFits = visibleWidth(spec.label) + WORKING_ROW_CHROME_COLS <= Math.max(0, cx.cols);
+	children.push(keyed(elapsed(now - spec.startedAt), "elapsed"));
+	if (labelFits) {
+		const inlineLabel = describeShimmer([{ text: spec.label, palette: spec.palette }], "label");
+		children.push(
+			node("text", { text: "·", role: "omp.working.sep" }, undefined, "sep"),
+			node(
+				inlineLabel.k,
+				{ ...inlineLabel.p, role: "omp.working.label" } as TspProps,
+				inlineLabel.c,
+				inlineLabel.key,
+			),
+		);
+	}
+	children.push(node("row", { grow: 1 }, undefined, "fill"));
 	if (variant?.kind === "compaction") children.push(node("progress", { value: null }, undefined, "progress"));
 	if (spec.interruptKey !== undefined) {
 		const verb = variant?.kind === "retry" ? "Cancel" : "Stop";
@@ -86,7 +103,27 @@ export function describeWorkingRow(spec: WorkingRowSpec, cx: DescribeContext, no
 			),
 		);
 	}
-	return row(children, { role: "omp.working", align: "center", gap: "sm" });
+	const chrome = row(children, {
+		role: labelFits ? "omp.working" : undefined,
+		align: "center",
+		gap: "sm",
+	});
+	if (labelFits) return chrome;
+	const mid = spec.palette?.mid;
+	const wrapped = keyed(
+		text(
+			[
+				span(
+					spec.label,
+					typeof mid === "string" ? mid : undefined,
+					shimmerEnabled() ? { fx: "shimmer" } : undefined,
+				),
+			],
+			{ wrap: "word", role: "omp.working.label" },
+		),
+		"label",
+	);
+	return col([chrome, wrapped], { role: "omp.working", gap: "xs" });
 }
 
 type ColorFn = (str: string) => string;
@@ -273,8 +310,10 @@ export class Loader extends Text {
 			variant?.kind === "retry" && cx.supports("meter")
 				? Math.round((Math.max(0, variant.delayMs - (now - spec.startedAt)) / Math.max(1, variant.delayMs)) * 100)
 				: -1;
+		const labelFits = visibleWidth(spec.label) + WORKING_ROW_CHROME_COLS <= Math.max(0, cx.cols);
 		const key = [
 			spec.label,
+			labelFits,
 			spec.startedAt,
 			variant?.kind,
 			variant?.kind === "retry" ? `${variant.attempt}/${variant.max}` : "",

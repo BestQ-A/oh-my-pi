@@ -1,7 +1,7 @@
 /**
  * A live (function) working label — the background-job wait row — is re-read
- * on every tick and kept to one terminal row. Without the clamp a long list of
- * job ids wrapped the working row onto a second line at narrow widths.
+ * on every tick and shown in full. A long list of job ids wraps onto further
+ * rows instead of being ellipsized.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
@@ -50,17 +50,21 @@ describe("InteractiveMode live working label", () => {
 		await tempDir.remove();
 	});
 
-	it("keeps a long live label on one row", () => {
+	it("wraps a long live label instead of clipping it", () => {
 		const jobs = ["bg_1", "bg_2", "bg_3", "bg_4", "bg_5", "bg_6"];
+		const full = `Waiting for ${jobs.length} background jobs: ${jobs.join(", ")}`;
 		mode.ensureLoadingAnimation();
-		mode.setWorkingMessage(() => `Waiting for ${jobs.length} background jobs: ${jobs.join(", ")}`);
+		mode.setWorkingMessage(() => full);
 
 		const rows = mode.statusContainer
 			.render(COLUMNS)
 			.map(line => Bun.stripANSI(line).trimEnd())
 			.filter(line => line.length > 0);
-		expect(rows).toHaveLength(1);
-		expect(rows[0]).toContain("Waiting for 6 background jobs");
-		expect(Bun.stringWidth(rows[0] ?? "")).toBeLessThanOrEqual(COLUMNS);
+		const shown = rows.join(" ");
+		expect(shown).toContain("Waiting for 6 background jobs");
+		for (const id of jobs) expect(shown).toContain(id);
+		expect(shown).not.toContain("…");
+		expect(rows.length).toBeGreaterThan(1);
+		for (const row of rows) expect(Bun.stringWidth(row)).toBeLessThanOrEqual(COLUMNS);
 	});
 });
