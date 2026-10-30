@@ -176,16 +176,11 @@ function normalizeIntent(intent: unknown): string | undefined {
 	);
 }
 
-/** Job ids the async-wait working row lists before collapsing the rest to `+N`. */
-const ASYNC_WAIT_LISTED_JOBS = 3;
-
-/** Working-row text while the run only waits on background jobs; short enough for a narrow terminal. */
+/** Working-row text while the run only waits on background jobs. Every id is named; the row wraps rather than collapsing the rest to `+N`. */
 function formatAsyncWaitLabel(jobIds: readonly string[]): string {
 	if (jobIds.length === 0) return "Waiting for background work";
 	if (jobIds.length === 1) return `Waiting for background job ${jobIds[0]}`;
-	const listed = jobIds.slice(0, ASYNC_WAIT_LISTED_JOBS).join(", ");
-	const more = jobIds.length > ASYNC_WAIT_LISTED_JOBS ? ` +${jobIds.length - ASYNC_WAIT_LISTED_JOBS}` : "";
-	return `Waiting for ${jobIds.length} background jobs: ${listed}${more}`;
+	return `Waiting for ${jobIds.length} background jobs: ${jobIds.join(", ")}`;
 }
 
 /** Render args for a live card: the harness strips `i` from executed args, but the stored block keeps it. */
