@@ -1197,6 +1197,33 @@ export const cfgComposerPredictionAlternatives = register({
 	},
 });
 
+export const cfgComposerInlineCompletions = register({
+	id: "composer.inlineCompletions",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Inline Tab Autocomplete",
+		get description() {
+			return `Show inline ghost-text continuations while typing in the composer; ${formatKeyHint("tab")} or ${formatKeyHint("right")} accepts all, ${formatKeyHint("ctrl+right")} accepts the next word, and ${formatKeyHint("escape")} dismisses`;
+		},
+	},
+});
+
+export const cfgComposerMarginHud = register({
+	id: "composer.marginHud",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "4-Edge Margin HUD",
+		description:
+			"Show hardware pulse, git dirty files, TODO tree, subagents/daemons, and keybinding hints in the top/bottom/left/right margins around the composer (Alt+H toggles).",
+	},
+});
+
 export const cfgSpellingAutocorrect = register({
 	id: "spelling.autocorrect",
 	type: "boolean",

@@ -67,6 +67,7 @@ import {
 	getActiveProfile,
 	getProjectDir,
 	isEnoent,
+	isRecord,
 	logger,
 	postmortem,
 	prompt,
@@ -81,6 +82,7 @@ import { CollabController } from "../collab/controller";
 import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey, rawKeyHint } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import { findActiveModelPreset } from "../config/model-presets";
 import { formatModelString, type ResolvedModelRoleValue, resolveModelRoleValue } from "../config/model-resolver";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
@@ -227,6 +229,12 @@ import {
 	todoMatchesAnyDescription,
 } from "@oh-my-pi/pi-tui/tools/todo";
 import { vocalizer } from "../tts/vocalizer";
+import {
+	canUseDefaultFinopsUsageCache,
+	getFinopsUsageCachePath,
+	readCachedFinopsUsageReports,
+	seedStatusLineQuotaPools,
+} from "./quota-hud-bridge";
 import { applyFileLinkSetting, applyHyperlinkSetting, fileHyperlink } from "@oh-my-pi/pi-tui/render/hyperlink";
 import {
 	extensionLinkClicksAvailable,
@@ -311,7 +319,7 @@ import { hasSpotlightOriginal, SpotlightSheet } from "@oh-my-pi/pi-tui/overlays/
 import type { SpotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
 import { readArtifactText } from "../spotlight/sink";
 import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
-import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
+import { StatusLineComponent, summarizeQuotaPoolCapsules } from "@oh-my-pi/pi-tui/status-line";
 import { statusLineHost } from "./status-line-host";
 import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
@@ -323,6 +331,9 @@ import { getAssistantMessageLinkTargets } from "@oh-my-pi/pi-tui/prompt/interact
 import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { MAGIC_KEYWORDS } from "./magic-keywords";
 import { sharedComposerCache } from "@oh-my-pi/pi-tui/prompt/composer-cache";
+import { ComposerMarginHudFrame, MarginHudTelemetryCollector } from "./components/composer-margin-hud";
+import { ComposerPredictionMultiSelect } from "./components/composer-prediction-multiselect";
+import { TranscriptScrollbackOverlay } from "./components/transcript-scrollback-overlay";
 import { BtwController } from "./controllers/btw-controller";
 import { CleanseCommandController } from "./controllers/cleanse-command-controller";
 import { CommandController } from "./controllers/command-controller";
@@ -402,6 +413,8 @@ import {
 	askTimeoutMs,
 	cfgAutocompleteMaxVisible,
 	cfgComposerPredictionAlternatives,
+	cfgComposerInlineCompletions,
+	cfgComposerMarginHud,
 	cfgComposerPredictions,
 	cfgComposerShape,
 	cfgComposerTokenRate,
@@ -506,6 +519,8 @@ const cfgLiveUiSettings = combine({
 	"recap.idleSeconds": cfgRecapIdleSeconds,
 	"composer.predictions": cfgComposerPredictions,
 	"composer.predictionAlternatives": cfgComposerPredictionAlternatives,
+	"composer.inlineCompletions": cfgComposerInlineCompletions,
+	"composer.marginHud": cfgComposerMarginHud,
 	"compaction.enabled": cfgCompactionEnabled,
 	"compaction.methodOrder": cfgCompactionMethodOrder,
 	"display.hideToolActivity": cfgDisplayHideToolActivity,
@@ -1843,6 +1858,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#sessionInfoOverlayHandle: OverlayHandle | undefined;
 	#jobsSheetHandle: OverlayHandle | undefined;
 	#spotlightSheetHandle: OverlayHandle | undefined;
+	#wheelScrollbackHandle: OverlayHandle | undefined;
 	/** Re-renders the open jobs sheet so output tails and pids stay live. */
 	#jobsSheetTimer: NodeJS.Timeout | undefined;
 	#planReviewOwner: object | undefined;
@@ -1868,6 +1884,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #toolUiContextSetter: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
 
 	readonly #codexResetFireworksController: CodexResetFireworksController;
+	readonly #marginHudCollector: MarginHudTelemetryCollector;
+	readonly #marginHudFrame: ComposerMarginHudFrame;
+	readonly #predictionMultiSelect: ComposerPredictionMultiSelect;
+	#cachedFinopsReports: readonly unknown[] = [];
+	#finopsCacheRefreshInFlight = false;
 	readonly #btwController: BtwController;
 	readonly #tanCommandController: TanCommandController;
 	readonly #omfgController: OmfgController;
@@ -2131,9 +2152,20 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor = this.composer.editor;
 		this.editor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
 		this.editor.placeholder = () => this.#composerHint();
-		this.editor.predictions = () => this.#eventController.composerPrediction.choices;
+		// The multi-select pill bar claims numbered-menu predictions: painting them as ghost
+		// text too would duplicate the UI, so predictions yield while candidates show.
+		this.editor.predictions = () =>
+			this.#predictionMultiSelect?.hasVisibleCandidates()
+				? undefined
+				: this.#eventController.composerPrediction.choices;
 		this.editor.onPredictionAccepted = index => this.#eventController.composerPrediction.accepted(index);
 		this.editor.onPredictionShown = () => this.#eventController.composerPrediction.shown();
+		this.editor.prediction = () => undefined;
+		this.editor.onFallbackTab = () => !this.focusedAgentId && this.#predictionMultiSelect.toggleAll();
+		this.editor.inlineCompletion = (lines, line, col) =>
+			this.#eventController?.composerInlineCompletion.getInlineCompletion(lines, line, col);
+		this.editor.onInlineCompletionEvent = (ev, text) =>
+			this.#eventController?.composerInlineCompletion.handleEvent(ev, text);
 		this.editor.composerState = () => this.#composerNativeState();
 		this.editor.onToggleDictation = () => void this.#toggleComposerDictation();
 		this.editor.imageReferenceHyperlink = imageReferenceHyperlink;
@@ -2212,6 +2244,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#eventBusUnsubscribers.push(
 			onNativeRenderingChange(() => {
 				if ((this.viewSession.extensionRunner?.getLinkSchemes().length ?? 0) > 0) this.#redrawExtensionLinks();
+				else this.ui.requestRender();
 			}),
 		);
 		this.chatContainer = new TranscriptContainer();
@@ -2310,6 +2343,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				case "status.cache":
 					void this.handleSessionCommand();
 					return;
+				case "status.quota":
+					void this.handleQuotaCommand();
+					return;
 				case "status.path":
 					openPath(this.sessionManager.getCwd());
 					return;
@@ -2329,6 +2365,103 @@ export class InteractiveMode implements InteractiveModeContext {
 		// value while parallel work is actively generating tokens.
 		this.statusLine.setVibeWorkerTokenRateProvider(() =>
 			aggregateVibeWorkerTokensPerSecond(this.session.getAgentId() ?? MAIN_AGENT_ID),
+		);
+		if (canUseDefaultFinopsUsageCache()) {
+			const cachedUsage = readCachedFinopsUsageReports();
+			if (cachedUsage.length > 0) {
+				this.#cachedFinopsReports = cachedUsage;
+				seedStatusLineQuotaPools(this.statusLine, cachedUsage);
+			}
+		}
+		this.#predictionMultiSelect = new ComposerPredictionMultiSelect({
+			getRawPrediction: () =>
+				this.focusedAgentId
+					? undefined
+					: (this.#eventController?.composerPrediction.text ??
+						this.#eventController?.composerInlineCompletion.emptyPrediction),
+			requestRender: () => this.ui.requestRender(),
+		});
+		this.#marginHudCollector = new MarginHudTelemetryCollector({
+			cwd: () => this.sessionManager.getCwd(),
+			onUpdate: () => {
+				void this.#refreshFinopsReportsCache();
+				this.ui.requestRender();
+			},
+			autoStart: false,
+		});
+		this.#marginHudFrame = new ComposerMarginHudFrame(
+			{
+				isEnabled: () => cfgComposerMarginHud.get(this.settings),
+				isPlainEditorActive: () =>
+					this.editorContainer.children.length === 1 && this.editorContainer.children[0] === this.editor,
+				renderCenterEditor: w => {
+					const plain =
+						this.editorContainer.children.length === 1 &&
+						this.editorContainer.children[0] === this.editor &&
+						!this.focusedAgentId;
+					if (!plain) return this.editorContainer.render(w);
+					return [...this.#predictionMultiSelect.render(w), ...this.editorContainer.render(w)];
+				},
+				getCwd: () => this.sessionManager.getCwd(),
+				getActivePresetName: () =>
+					typeof this.settings.getModelRoles === "function" ? findActiveModelPreset(this.settings) : undefined,
+				getQuotaCapsules: () =>
+					summarizeQuotaPoolCapsules(this.#cachedFinopsReports, {
+						activeProvider: this.viewSession.model?.provider,
+						activeModelId: this.viewSession.model?.id,
+					}),
+				getTodoPhases: () => this.todoPhases,
+				getSubagentSummary: () => {
+					const viewSession = this.viewSession;
+					const tree =
+						typeof viewSession.getAsyncJobTree === "function" ? viewSession.getAsyncJobTree() : null;
+					if (!tree) return { running: [], recent: [] };
+					const now = Date.now();
+					const resolveFocusId = (job: unknown): string | undefined => {
+						if (!job || typeof job !== "object") return undefined;
+						if ("agentId" in job && typeof job.agentId === "string" && job.agentId.trim().length > 0) {
+							return job.agentId.trim();
+						}
+						if ("type" in job && job.type === "bash") {
+							return undefined;
+						}
+						if ("id" in job && typeof job.id === "string" && job.id.trim().length > 0) {
+							return job.id.trim();
+						}
+						return undefined;
+					};
+					return {
+						running: tree.running.map(job => {
+							const id = resolveFocusId(job);
+							return {
+								...(id !== undefined ? { id } : {}),
+								label: (job.agentId && job.agentId.trim()) || job.label || job.id,
+								elapsed: Number.isFinite(job.startTime)
+									? formatCoarseDuration(Math.max(0, now - job.startTime))
+									: undefined,
+							};
+						}),
+						recent: tree.recent.map(job => {
+							const id = resolveFocusId(job);
+							return {
+								...(id !== undefined ? { id } : {}),
+								label: (job.agentId && job.agentId.trim()) || job.label || job.id,
+								status: job.status,
+							};
+						}),
+					};
+				},
+				getMcpServers: () =>
+					(this.mcpManager?.getConnectedServers() ?? []).map(name => ({
+						name,
+						tools: this.mcpManager?.getConnection(name)?.tools?.length ?? 0,
+					})),
+				isDraftEmpty: () => this.editor.getText().length === 0,
+				hasNumberedPrediction: () => this.#predictionMultiSelect.hasVisibleCandidates(),
+				getPredictionSelectionStatus: () => this.#predictionMultiSelect.getStatus(),
+				requestRender: () => this.ui.requestRender(),
+			},
+			this.#marginHudCollector,
 		);
 
 		this.hideToolActivity = cfgDisplayHideToolActivity.get(settings);
@@ -2356,6 +2489,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.collabController = new CollabController(this);
 		this.session.setPromptDropped?.(prompt => this.restoreDroppedPrompt(prompt));
 		this.#observerRegistry = new SessionObserverRegistry();
+		this.#applyExtensionLinks();
 	}
 
 	#handleJudgmentBatchProgress(progress: JudgmentBatchProgress): void {
@@ -2465,6 +2599,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#dialogLifetime = new AbortController();
 
 		this.keybindings = logger.time("InteractiveMode.init:keybindings", () => KeybindingsManager.create());
+		setExtensionLinkPicking(this.#linkPickable);
+		this.#applyExtensionLinks();
 		// Before first paint, so hints the user already learned never flash on.
 		await logger.time("InteractiveMode.init:hintUsage", () => hintUsage.load());
 
@@ -2484,6 +2620,8 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#closeAttempt?.abort();
 				this.session.beginDispose();
 				this.statusLine.dispose();
+				this.#marginHudCollector.stop();
+				this.#marginHudFrame.dispose();
 			},
 			saveDraft: text => this.sessionManager.saveDraft(text),
 			disposeSession: async reason => {
@@ -2540,6 +2678,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#syncHeaderExtras();
 		this.statusLine.watchBranch(() => this.ui.requestRender());
 		this.composer.setStatusComponent(this.statusLine);
+		if (cfgComposerMarginHud.get(this.settings)) {
+			this.#marginHudCollector.start();
+		}
 
 		this.composer.setRuntimeChildren(
 			[
@@ -2566,7 +2707,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.attachmentChipsContainer,
 				this.editorTopGapContainer,
 				this.hookWidgetContainerAbove,
-				this.editorContainer,
+				this.#marginHudFrame,
 				this.hookWidgetContainerBelow,
 			],
 			{
@@ -2579,6 +2720,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				// in. Classify every new root that can collapse on its own.
 				transientChrome: [
 					this.editorContainer,
+					this.#marginHudFrame,
 					this.attachmentChipsContainer,
 					this.reportContainer,
 					this.pendingShellContainer,
@@ -3306,6 +3448,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		this.statusLine.applyCwdChange();
+		this.#marginHudCollector.refreshNow();
 		return true;
 	}
 
@@ -4288,6 +4431,19 @@ export class InteractiveMode implements InteractiveModeContext {
 		) {
 			composerPrediction.cancel();
 		}
+		if (any("composer.inlineCompletions") && !next["composer.inlineCompletions"]) {
+			this.#eventController.composerInlineCompletion.cancel();
+			this.ui.requestRender();
+		}
+		if (any("composer.marginHud")) {
+			if (next["composer.marginHud"]) {
+				if (this.isInitialized) this.#marginHudCollector.start();
+			} else {
+				this.#marginHudCollector.stop();
+			}
+			this.#marginHudFrame.invalidate();
+			this.ui.requestRender();
+		}
 		if (any("compaction.enabled", "compaction.methodOrder")) {
 			this.statusLine.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 			this.ui.requestRender();
@@ -4473,7 +4629,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const before = extensionLinksVersion();
 		const viewed = this.viewSession.extensionRunner;
 		viewed?.followSuspension(this.session.extensionRunner);
-		setExtensionLinks(viewed?.getLinkSchemes() ?? []);
+		setExtensionLinks(["omp-ui", ...(viewed?.getLinkSchemes() ?? [])]);
 		return extensionLinksVersion() !== before;
 	}
 
@@ -4512,8 +4668,180 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 	}
 
-	/** Raise `link_activate` for `url` on `runner`, the extension runner of the transcript it was drawn in. */
+	#activateOmpUiLink(url: string): boolean {
+		switch (url) {
+			case "omp-ui:quota":
+				void this.handleQuotaCommand();
+				return true;
+			case "omp-ui:model":
+				this.showModelSelector({ temporaryOnly: true });
+				return true;
+			case "omp-ui:desktop-hud":
+				void this.handleQuotaCommand("toggle");
+				return true;
+			case "omp-ui:hud-toggle":
+				this.handleHudCommand("toggle");
+				return true;
+			case "omp-ui:hud-refresh":
+				this.handleHudCommand("refresh");
+				return true;
+			case "omp-ui:todo":
+				this.setTodoExpanded(!this.todoExpanded);
+				return true;
+			case "omp-ui:mcp":
+				this.handleToolsCommand();
+				return true;
+			case "omp-ui:jobs":
+				this.showJobsSheet();
+				return true;
+			case "omp-ui:accept-chunk":
+				this.editor.acceptGhostChunk();
+				this.ui.setFocus(this.editor);
+				this.ui.requestRender();
+				return true;
+			case "omp-ui:pred-toggle-all":
+				return this.toggleAllPredictions();
+			case "omp-ui:pred-select-all":
+				return this.#predictionMultiSelect.selectAll();
+			case "omp-ui:pred-clear":
+				return this.clearSelectedPredictions();
+			case "omp-ui:pred-dismiss":
+				return this.#predictionMultiSelect.dismiss();
+			case "omp-ui:pred-submit":
+				if (this.#predictionMultiSelect.getCheckedCount() > 0) {
+					this.editor.submit();
+					this.ui.setFocus(this.editor);
+					return true;
+				}
+				return false;
+		}
+		if (url.startsWith("omp-ui:pred-toggle:")) {
+			const parsed = Number.parseInt(url.slice("omp-ui:pred-toggle:".length), 10);
+			if (!Number.isInteger(parsed) || parsed < 1 || parsed > 9) return false;
+			const ok = this.togglePredictionItem(parsed);
+			this.ui.setFocus(this.editor);
+			return ok;
+		}
+		if (url.startsWith("omp-ui:accept-pred:")) {
+			const tail = url.slice("omp-ui:accept-pred:".length);
+			let optionIndex: number | undefined;
+			if (tail !== "all") {
+				const parsed = Number.parseInt(tail, 10);
+				if (!Number.isInteger(parsed) || parsed < 1 || parsed > 9) return false;
+				optionIndex = parsed;
+			}
+			this.editor.acceptPredictionOption(optionIndex);
+			this.ui.setFocus(this.editor);
+			this.ui.requestRender();
+			return true;
+		}
+		if (url.startsWith("omp-ui:insert-file:")) {
+			let relPath: string;
+			try {
+				relPath = decodeURIComponent(url.slice("omp-ui:insert-file:".length));
+			} catch {
+				return false;
+			}
+			if (!relPath) return false;
+			this.editor.insertText(`@${relPath} `);
+			this.ui.setFocus(this.editor);
+			this.ui.requestRender();
+			return true;
+		}
+		if (url.startsWith("omp-ui:subagent:")) {
+			let agentId: string;
+			try {
+				agentId = decodeURIComponent(url.slice("omp-ui:subagent:".length)).trim();
+			} catch {
+				return false;
+			}
+			if (!agentId) return false;
+			void this.focusAgentSession(agentId).catch((err: unknown) => {
+				this.showStatus(err instanceof Error ? err.message : String(err));
+			});
+			return true;
+		}
+		return false;
+	}
+	toggleAllPredictions(): boolean {
+		if (this.focusedAgentId) return false;
+		return this.#predictionMultiSelect.toggleAll();
+	}
+
+	togglePredictionItem(index: number): boolean {
+		if (this.focusedAgentId) return false;
+		return this.#predictionMultiSelect.toggleItem(index);
+	}
+
+	clearSelectedPredictions(): boolean {
+		return this.#predictionMultiSelect.clearChecked();
+	}
+
+	consumePredictionSubmission(editorText: string): string {
+		const { text, consumedSelection } = this.#predictionMultiSelect.consumeSubmission(editorText);
+		if (consumedSelection) {
+			this.#eventController?.composerPrediction.cancel();
+			this.ui.requestRender();
+		}
+		return text;
+	}
+	openWheelScrollback(): boolean {
+		if (this.ui.hasOverlay()) return false;
+		if (this.editorContainer.children.length !== 1 || this.editorContainer.children[0] !== this.editor) {
+			return false;
+		}
+		const { columns, rows } = this.ui.terminal;
+		const contentWidth = Math.max(1, columns - 1);
+		const initialLines = this.chatContainer.render(contentWidth);
+		// Only enter fullscreen scrollback when the session transcript has enough rows to scroll.
+		if (initialLines.length <= Math.max(4, rows - 8)) {
+			return false;
+		}
+		this.#wheelScrollbackHandle?.hide();
+		this.#wheelScrollbackHandle = undefined;
+
+		const closeOverlay = (): void => {
+			const handle = this.#wheelScrollbackHandle;
+			this.#wheelScrollbackHandle = undefined;
+			handle?.hide();
+			this.ui.setFocus(this.editorContainer.children[0] ?? this.editor);
+			this.ui.requestRender();
+		};
+
+		let cachedFirstPass: readonly string[] | undefined = initialLines;
+		const overlay = new TranscriptScrollbackOverlay({
+			renderTranscriptLines: w => {
+				if (cachedFirstPass && w === contentWidth) {
+					const snap = cachedFirstPass;
+					cachedFirstPass = undefined;
+					return snap;
+				}
+				return this.chatContainer.render(w);
+			},
+			getTerminalSize: () => ({ columns: this.ui.terminal.columns, rows: this.ui.terminal.rows }),
+			isStreaming: () => Boolean(this.viewSession?.isStreaming),
+			requestRender: () => this.ui.requestRender(),
+			onClose: closeOverlay,
+		});
+
+		this.#wheelScrollbackHandle = this.ui.showOverlay(overlay, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+			fullscreen: true,
+		});
+		this.ui.setFocus(overlay);
+		this.ui.requestRender();
+		return true;
+	}
+
+	/** Raise `link_activate` for `url` on `runner`, the extension runner of the transcript it was drawn in,
+	 *  or run built-in `omp-ui:` actions. */
 	#activateLink(url: string, runner: ExtensionRunner | undefined): boolean {
+		if (url.startsWith("omp-ui:")) {
+			return this.#activateOmpUiLink(url);
+		}
 		if (!runner) return false;
 		// A focused subagent's runner is headless: hand its handler the UI drawing that transcript.
 		runner.emitLinkActivate(url, this.session.extensionRunner?.getUIContext()).catch((error: unknown) => {
@@ -4931,6 +5259,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Placeholder for the empty composer; see `COMPOSER_HINTS` for the registered hints. */
 	#composerHint(): string | undefined {
+		if (!this.focusedAgentId) {
+			const multiSelectHint = this.#predictionMultiSelect?.getPlaceholderHint();
+			if (multiSelectHint) return multiSelectHint;
+		}
 		return resolveComposerHint({
 			runningAgents: this.#runningSubagentCount,
 			focusedOnAgent: this.focusedAgentId !== undefined,
@@ -8163,6 +8495,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#eventController.dispose();
 		this.#codexResetFireworksController.dispose();
 		this.statusLine.dispose();
+		this.#marginHudCollector.stop();
+		this.#marginHudFrame.dispose();
 		if (this.#resizeHandler) {
 			process.stdout.removeListener("resize", this.#resizeHandler);
 			this.#resizeHandler = undefined;
@@ -8518,9 +8852,20 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.viewportRowsProvider = () => this.ui.terminal.rows;
 		nextEditor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
 		nextEditor.placeholder = () => this.#composerHint();
-		nextEditor.predictions = () => this.#eventController.composerPrediction.choices;
+		// The multi-select pill bar claims numbered-menu predictions: painting them as ghost
+		// text too would duplicate the UI, so predictions yield while candidates show.
+		nextEditor.predictions = () =>
+			this.#predictionMultiSelect?.hasVisibleCandidates()
+				? undefined
+				: this.#eventController.composerPrediction.choices;
 		nextEditor.onPredictionAccepted = index => this.#eventController.composerPrediction.accepted(index);
 		nextEditor.onPredictionShown = () => this.#eventController.composerPrediction.shown();
+		nextEditor.prediction = () => undefined;
+		nextEditor.onFallbackTab = () => !this.focusedAgentId && this.#predictionMultiSelect.toggleAll();
+		nextEditor.inlineCompletion = (lines, line, col) =>
+			this.#eventController?.composerInlineCompletion.getInlineCompletion(lines, line, col);
+		nextEditor.onInlineCompletionEvent = (ev, text) =>
+			this.#eventController?.composerInlineCompletion.handleEvent(ev, text);
 		nextEditor.composerState = () => this.#composerNativeState();
 		nextEditor.onToggleDictation = () => void this.#toggleComposerDictation();
 		nextEditor.attachmentChips = previousEditor.attachmentChips;
@@ -9197,6 +9542,37 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleUsageCommand(reports);
 	}
 
+	handleQuotaCommand(subcommand?: string): Promise<void> {
+		return this.#commandController.handleQuotaCommand(subcommand);
+	}
+
+	handleHudCommand(mode?: string): void {
+		this.#commandController.handleHudCommand(mode);
+		if (cfgComposerMarginHud.get(this.settings) || mode?.trim().toLowerCase() === "refresh") {
+			this.#marginHudCollector.refreshNow();
+			void this.#refreshFinopsReportsCache();
+		}
+	}
+
+	async #refreshFinopsReportsCache(): Promise<void> {
+		if (this.#finopsCacheRefreshInFlight || !canUseDefaultFinopsUsageCache()) return;
+		this.#finopsCacheRefreshInFlight = true;
+		try {
+			const raw = await fs.readFile(getFinopsUsageCachePath(), "utf8");
+			const parsed: unknown = JSON.parse(raw);
+			if (!isRecord(parsed) || !Array.isArray(parsed.reports)) return;
+			const reports: readonly unknown[] = parsed.reports;
+			if (!Bun.deepEquals(this.#cachedFinopsReports, reports)) {
+				this.#cachedFinopsReports = reports;
+				this.ui.requestRender();
+			}
+		} catch {
+			// Ignore missing or mid-write cache file.
+		} finally {
+			this.#finopsCacheRefreshInFlight = false;
+		}
+	}
+
 	async handleChangelogCommand(args = ""): Promise<void> {
 		await this.#commandController.handleChangelogCommand(args);
 	}
@@ -9527,7 +9903,13 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	showUsageDashboard(reports: UsageReport[]): void {
+		this.#cachedFinopsReports = reports;
 		this.#selectorController.showUsageDashboard(reports);
+	}
+
+	updateUsageDashboard(reports: UsageReport[]): void {
+		this.#cachedFinopsReports = reports;
+		this.#selectorController.updateUsageDashboard(reports);
 	}
 
 	showAdvisorConfigure(): void {

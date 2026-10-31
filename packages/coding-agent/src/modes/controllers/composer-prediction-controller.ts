@@ -80,7 +80,19 @@ type PredictionContext = Pick<InteractiveModeContext, "settings" | "viewSession"
  * `undefined` when the model skipped, rambled, or replied with nothing usable.
  */
 export function parseComposerPrediction(reply: string): string | undefined {
-	let text = sanitizeText(reply).replace(/\s+/g, " ").trim();
+	const sanitized = sanitizeText(reply).trim();
+	const lines = sanitized
+		.split(/\r?\n/)
+		.map(l => l.replace(/\s+/g, " ").trim())
+		.filter(Boolean);
+	const isMultilineNumbered = lines.length >= 2 && lines.every(l => /^[1-9][.)、]\s*\S/.test(l));
+	let text = isMultilineNumbered
+		? lines.join("  ")
+		: sanitized
+				.replace(/\s+(?=[2-9][.)、]\s*\S)/g, "\0")
+				.replace(/\s+/g, " ")
+				.replace(/\0/g, "  ")
+				.trim();
 	const quoted = WRAPPING_QUOTES.exec(text);
 	if (quoted) text = (quoted[1] ?? quoted[2] ?? quoted[3] ?? "").trim();
 	if (!text || text.includes(SKIP_REPLY) || text.length > MAX_PREDICTION_LENGTH) return undefined;
@@ -150,6 +162,13 @@ export class ComposerPredictionController {
 		const prediction = this.#prediction;
 		if (!prediction || !this.#isCurrent(prediction.source)) return undefined;
 		return prediction.choices;
+	}
+
+	/** The prediction's raw text for the multi-select pill bar: a single choice verbatim, or the alternatives renumbered onto one line. */
+	get text(): string | undefined {
+		const choices = this.choices;
+		if (!choices || choices.length === 0) return undefined;
+		return choices.length === 1 ? choices[0] : choices.map((c, i) => `${i + 1}. ${c}`).join("  ");
 	}
 
 	/** Predict the next message for the turn that just completed, superseding any earlier prediction. */
@@ -242,6 +261,7 @@ export class ComposerPredictionController {
 				}),
 				maxTokens: source.session.ephemeralMaxTokensPreservesRequest() ? PREDICTION_MAX_TOKENS : undefined,
 				minimizeEffort: true,
+				disableReasoning: true,
 				signal: AbortSignal.any([abort.signal, deadline]),
 				onUsage: message => this.#recordUsage(source, message),
 			});

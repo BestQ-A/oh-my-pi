@@ -211,6 +211,7 @@
 
 - Added the `codexAccessPrograms` stream option and `configureCodexAccessPrograms()` process default to turn off the automatic Daybreak Blue `access_programs` request on Codex ([#17508](https://github.com/can1357/oh-my-pi/pull/17508) by [@H4vC](https://github.com/H4vC))
 - Added `waitForSibling` to `RotateCredentialOptions`; set it to `false` to skip the short sibling-unblock wait in `limits.rotate()` while still blocking the failed credential ([#17439](https://github.com/can1357/oh-my-pi/pull/17439) by [@wolfiesch](https://github.com/wolfiesch))
+- Added built-in quota usage reporting and credential ranking for Zhipu Coding Plan (`zhipu-coding-plan`) across 5-hour and weekly token/credit windows
 
 ### Changed
 

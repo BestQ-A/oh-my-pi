@@ -15,6 +15,7 @@ import { type SymbolKey, type Theme, type ThemeColor, theme } from "../theme";
 import { SYMBOL_PRESETS } from "../theme/symbols";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
 import { fileHyperlink } from "../render/hyperlink";
+import { formatActionMarker } from "../render/extension-links";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../theme/session-color";
 import { summarizeLoopCondition } from "./loop";
 import { formatMetric } from "../components/metric";
@@ -30,7 +31,14 @@ import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { node, span } from "../native/describe";
 import { thinkingLevelToken } from "../theme/theme-class";
 import type { StatusLineSession } from "./host";
-import type { RenderedSegment, SegmentContext, SegmentView, StatusLineSegment, StatusLineSegmentId } from "./types";
+import type {
+	QuotaPoolCapsule,
+	RenderedSegment,
+	SegmentContext,
+	SegmentView,
+	StatusLineSegment,
+	StatusLineSegmentId,
+} from "./types";
 
 export type { SegmentContext } from "./types";
 
@@ -387,7 +395,10 @@ const modelSegment: StatusLineSegment = {
 		// warning-colored badge so past-the-limit service is never mistaken for normal.
 		const slowModeLabel = ctx.session.getAnthropicSlowModeLabel?.();
 		if (slowModeLabel) content += theme.fg("warning", `${theme.sep.dot}${slowModeLabel}`);
-		return { content, visible: true };
+		return {
+			content: content ? formatActionMarker(content, "omp-ui:model", "status-model") : "",
+			visible: true,
+		};
 	},
 	describe(ctx) {
 		// Name, then the thinking level as a word in its level colour after a
@@ -1283,7 +1294,10 @@ const usageSegment: StatusLineSegment = {
 			parts.push(theme.fg(resetCreditsColor(resets), resetText));
 		}
 		const content = withIcon(theme.icon.time, parts.join(theme.sep.dot));
-		return { content, visible: true };
+		return {
+			content: content ? formatActionMarker(content, "omp-ui:quota", "status-usage") : "",
+			visible: true,
+		};
 	},
 	describe(ctx) {
 		const u = ctx.usage;
@@ -1324,6 +1338,64 @@ const usageSegment: StatusLineSegment = {
 	},
 };
 
+const QUOTA_POOL_SEVERITY_COLORS: Record<QuotaPoolCapsule["severity"], ThemeColor> = {
+	ok: "success",
+	warning: "warning",
+	error: "error",
+};
+
+const quotaPoolsSegment: StatusLineSegment = {
+	id: "quota_pools",
+	render(ctx) {
+		const pools = ctx.quotaPools;
+		if (!pools || pools.length === 0) {
+			return { content: "", visible: false };
+		}
+		const capsules: string[] = [];
+		for (const pool of pools) {
+			const shortLabel = sanitizeStatusText(pool.shortLabel);
+			if (!shortLabel) continue;
+			const label = pool.active ? accentFg(ctx, "accent", shortLabel) : theme.fg("muted", shortLabel);
+			const pct = theme.fg(QUOTA_POOL_SEVERITY_COLORS[pool.severity], `${Math.round(pool.remainingPct)}%`);
+			const cleanReset = pool.resetText ? sanitizeStatusText(pool.resetText) : "";
+			const reset = cleanReset ? theme.fg("dim", `/${cleanReset}`) : "";
+			const credits =
+				pool.bankedResets && pool.bankedResets > 0 ? theme.fg("accent", `✦${pool.bankedResets}`) : "";
+			capsules.push(`${label} ${pct}${reset}${credits}`);
+		}
+		if (capsules.length === 0) {
+			return { content: "", visible: false };
+		}
+		const content = capsules.join(` ${theme.fg("dim", "·")} `);
+		return {
+			content: content ? formatActionMarker(content, "omp-ui:quota", "status-quota-pools") : "",
+			visible: true,
+		};
+	},
+	describe(ctx) {
+		const pools = ctx.quotaPools;
+		if (!pools || pools.length === 0) return null;
+		const spans: TspSpan[] = [];
+		const activeLabelToken = accentToken(ctx, "accent");
+		let emitted = 0;
+		for (const pool of pools) {
+			const shortLabel = sanitizeStatusText(pool.shortLabel);
+			if (!shortLabel) continue;
+			if (emitted > 0) spans.push(span(" · ", "dim"));
+			spans.push(
+				span(shortLabel, pool.active ? activeLabelToken : "muted"),
+				span(" "),
+				span(`${Math.round(pool.remainingPct)}%`, QUOTA_POOL_SEVERITY_COLORS[pool.severity]),
+			);
+			const cleanReset = pool.resetText ? sanitizeStatusText(pool.resetText) : "";
+			if (cleanReset) spans.push(span(`/${cleanReset}`, "dim"));
+			if (pool.bankedResets && pool.bankedResets > 0) spans.push(span(`✦${pool.bankedResets}`, "accent"));
+			emitted++;
+		}
+		return emitted > 0 ? segView(spans) : null;
+	},
+};
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Segment Registry
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1354,6 +1426,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	cache: cacheSegment,
 	session_name: sessionNameSegment,
 	usage: usageSegment,
+	quota_pools: quotaPoolsSegment,
 	collab: collabSegment,
 	stream: streamSegment,
 	vim: vimSegment,

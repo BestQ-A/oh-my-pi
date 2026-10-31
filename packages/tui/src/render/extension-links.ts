@@ -122,6 +122,39 @@ export function formatExtensionLink(label: string, href: string, key: string): s
 }
 
 /**
+ * Wrap `label` in omp's internal OSC 8 action marker without adding hyperlink underlining.
+ * Stripped before terminal output by {@link stripExtensionLinkMarkers}; readable via
+ * {@link actionMarkerAt} (regardless of registered schemes) and {@link extensionLinkLabels}
+ * (when `href`'s scheme is registered in {@link setExtensionLinks}).
+ */
+export function formatActionMarker(label: string, href: string, key: string): string {
+	if (isNativeRendering()) return label;
+	const safe = href.replaceAll("\x1b", "").replaceAll("\x07", "");
+	if (!safe) return label;
+	const id = Bun.hash.crc32(`${safe}\0${key}`);
+	return `${MARKER_OPEN}-${id};${safe}\x1b\\${label}\x1b]8;;\x1b\\`;
+}
+
+/** Hint tag letters, home row first. */
+const LINK_HINT_ALPHABET = "asdfghjklqwertyuiopzxcvbnm";
+
+/**
+ * Tags for `count` links in keyboard link-hint mode: single letters while they suffice, otherwise
+ * two letters each, so no tag is a prefix of another. At most the alphabet squared (676) are made;
+ * links past that stay untagged.
+ */
+export function linkHintTags(count: number): string[] {
+	if (count <= LINK_HINT_ALPHABET.length) return LINK_HINT_ALPHABET.slice(0, Math.max(0, count)).split("");
+	const tags: string[] = [];
+	for (const first of LINK_HINT_ALPHABET) {
+		for (const second of LINK_HINT_ALPHABET) {
+			if (tags.length === count) return tags;
+			tags.push(`${first}${second}`);
+		}
+	}
+	return tags;
+}
+/**
  * `line` without omp's extension-link markers (the OSC 8 open and close around each label), for
  * terminal output. Every other hyperlink is kept as is.
  */
@@ -191,4 +224,36 @@ export function extensionLinkLabels(line: string): ExtensionLinkLabel[] {
 			labels[labels.length - 1] = { ...last, endsRow: true };
 	}
 	return labels;
+}
+
+/**
+ * Return the internal action/link marker URI covering 0-based visible cell `col` on `line`,
+ * regardless of which schemes are registered in {@link setExtensionLinks}.
+ */
+export function actionMarkerAt(line: string, col: number): string | undefined {
+	if (col < 0 || !line.includes(MARKER_OPEN)) return undefined;
+	let x = 0;
+	let cursor = 0;
+	let open: { url: string; start: number } | undefined;
+	for (const match of line.matchAll(OSC8_PATTERN)) {
+		x += visibleWidth(line.slice(cursor, match.index));
+		if (open && x > open.start && col >= open.start && col < x) {
+			return open.url;
+		}
+		open = undefined;
+		const params = match[1]!;
+		const uri = match[2]!;
+		cursor = match.index + match[0].length;
+		if (uri && MARKER_PARAMS_PATTERN.test(params)) {
+			if (x > col) return undefined;
+			open = { url: uri, start: x };
+		}
+	}
+	if (open) {
+		x += visibleWidth(line.slice(cursor));
+		if (x > open.start && col >= open.start && col < x) {
+			return open.url;
+		}
+	}
+	return undefined;
 }

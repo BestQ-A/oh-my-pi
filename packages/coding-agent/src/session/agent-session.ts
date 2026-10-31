@@ -13807,11 +13807,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				promptCacheKey: this.getPromptCacheKeyForModel(model) ?? this.agent.sessionId,
 				preferWebsockets: resolveWebsocketPreference(this.settings, model),
 				providerSessionState: this.#providerSessionState,
-				reasoning: toReasoningEffort(this.thinkingLevel),
+				reasoning: args.disableReasoning ? undefined : toReasoningEffort(this.thinkingLevel),
 				minimizeEffort: args.minimizeEffort,
 				// Budget-thinking transports can raise explicit caps to make room for their
 				// default thinking budget. A side turn's cap is a hard resource boundary.
-				disableReasoning: shouldDisableReasoning(this.thinkingLevel) || cappedBudgetThinking,
+				disableReasoning:
+					args.disableReasoning === true || shouldDisableReasoning(this.thinkingLevel) || cappedBudgetThinking,
 				hideThinkingSummary: this.agent.hideThinkingSummary,
 				serviceTier: this.#models.effectiveServiceTier(model),
 				maxTokens: args.maxTokens,

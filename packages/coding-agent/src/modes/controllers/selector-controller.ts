@@ -29,7 +29,9 @@ import { formatLoginIdentity } from "../../cli/oauth-terminal";
 import {
 	acquireModelRoleMutation,
 	applyModelPreset,
+	findActiveModelPreset,
 	formatModelPresetSwitch,
+	getModelPresetNames,
 	isCleanModelPresetSwitch,
 	modelPresetSavedMessage,
 	saveModelPreset,
@@ -56,6 +58,12 @@ import type {
 	SelectOnlyModelSelectorOptions,
 	SessionPickHandler,
 } from "../../modes/types";
+import {
+	canUseDefaultFinopsUsageCache,
+	launchDesktopQuotaHud,
+	seedStatusLineQuotaPools,
+	writeCachedFinopsUsageReports,
+} from "../quota-hud-bridge";
 import type { SessionOAuthAccountList } from "../../session/agent-session-types";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
 import {
@@ -442,11 +450,13 @@ export class SelectorController {
 			provider: account.provider,
 			label: accountIdentityLabel(account),
 		}));
-		const currentProvider = this.ctx.session.model?.provider;
-		const activeAccount = currentProvider
-			? this.ctx.session.modelRegistry.authStorage.oauth.identity(currentProvider, this.ctx.session.sessionId)
-			: undefined;
-		const usageModelSelectors = this.ctx.session.getUsageReportingModelSelectors(reports);
+		const settingsWithPresets = this.ctx.settings;
+		const hasPresetApi =
+			typeof settingsWithPresets.getOwnedModelPreset === "function" &&
+			typeof settingsWithPresets.getModelRoles === "function";
+		const presetNames = hasPresetApi ? getModelPresetNames(settingsWithPresets) : [];
+		const activePreset = presetNames.length > 0 ? findActiveModelPreset(settingsWithPresets) : undefined;
+		const presets = presetNames.map(name => ({ name, active: name === activePreset }));
 		const done = () => {
 			menu.handle?.hide();
 			this.#releaseMenu("usage-dashboard", menu);
@@ -456,23 +466,79 @@ export class SelectorController {
 		const dashboard = new UsageDashboardComponent({
 			reports,
 			unavailableAccounts,
-			renderDetail: (width, current) =>
-				renderUsageReports(
+			presets,
+			onSwitchPreset: async name => {
+				const result = await applyModelPreset(this.ctx.settings, this.ctx.session, name);
+				const message = formatModelPresetSwitch(name, result);
+				if (result.kind === "switched") {
+					this.ctx.statusLine.invalidate();
+					this.ctx.updateEditorBorderColor();
+				}
+				const activeName =
+					typeof this.ctx.settings.getOwnedModelPreset === "function" &&
+					typeof this.ctx.settings.getModelRoles === "function"
+						? findActiveModelPreset(this.ctx.settings)
+						: result.kind === "switched"
+							? name
+							: undefined;
+				return {
+					ok: result.kind === "switched",
+					message,
+					activeName,
+				};
+			},
+			onOpenDesktopHud: () => launchDesktopQuotaHud("open").message,
+			renderDetail: (width, current) => {
+				const liveProvider = this.ctx.session.model?.provider;
+				const liveActiveAccount = liveProvider
+					? this.ctx.session.modelRegistry.authStorage.oauth.identity(liveProvider, this.ctx.session.sessionId)
+					: undefined;
+				const liveUnavailable = collectUnreportedAccounts(current, accounts).map(account => ({
+					provider: account.provider,
+					label: accountIdentityLabel(account),
+				}));
+				return renderUsageReports(
 					current,
 					theme,
 					Date.now(),
 					width,
-					provider => (provider === currentProvider ? activeAccount : undefined),
-					usageModelSelectors,
-					unavailableAccounts,
-				),
+					provider => (provider === liveProvider ? liveActiveAccount : undefined),
+					this.ctx.session.getUsageReportingModelSelectors(current),
+					liveUnavailable,
+				);
+			},
 			loadActivity: loadDailyActivity,
-			refresh: () => this.ctx.session.fetchUsageReports(),
+			refresh: async () => {
+				const fresh = await this.ctx.session.fetchUsageReports();
+				if (fresh && fresh.length > 0) {
+					if (canUseDefaultFinopsUsageCache()) {
+						writeCachedFinopsUsageReports(fresh);
+					}
+					seedStatusLineQuotaPools(this.ctx.statusLine, fresh);
+				}
+				return fresh;
+			},
 			requestRender: () => this.ctx.ui.requestRender(),
 			onClose: done,
 		});
 		const menu = this.#claimMenu("usage-dashboard");
 		this.#mountMenu(menu, dashboard, () => this.#showFullscreenMenu(dashboard));
+	}
+
+	/** Push refreshed usage reports into the currently open usage dashboard overlay, if any. */
+	updateUsageDashboard(reports: UsageReport[]): void {
+		const open = this.#openMenus.get("usage-dashboard");
+		if (!(open?.component instanceof UsageDashboardComponent)) return;
+		const authStorage = this.ctx.session.modelRegistry.authStorage;
+		const accounts = selectReportableAccounts(
+			collectStoredAccounts(authStorage),
+			provider => authStorage.usage.providerFor(provider) !== undefined,
+		);
+		const unavailableAccounts = collectUnreportedAccounts(reports, accounts).map(account => ({
+			provider: account.provider,
+			label: accountIdentityLabel(account),
+		}));
+		open.component.updateReports(reports, unavailableAccounts);
 	}
 
 	showAdvisorConfigure(): void {

@@ -193,6 +193,7 @@ const FOCUSED_VIEW_COMMANDS: Record<string, (args: string) => boolean> = {
 	},
 	model: () => true,
 	switch: () => true,
+	quota: () => true,
 	usage: args => {
 		const { verb, rest } = parseSubcommand(args);
 		return !verb || (verb === "show" && !rest);
@@ -483,6 +484,35 @@ export class InputController {
 					this.ctx.resetDisplayAfterAppearanceRefresh();
 					return { consume: true };
 				}
+				if (matchesKey(data, "alt+q")) {
+					if (this.ctx.ui.hasOverlay()) return undefined;
+					if (this.ctx.handleQuotaCommand) {
+						void this.ctx.handleQuotaCommand();
+					} else {
+						void this.ctx.handleUsageCommand();
+					}
+					return { consume: true };
+				}
+				if (matchesKey(data, "alt+h")) {
+					if (this.ctx.ui.hasOverlay()) return undefined;
+					if (this.ctx.ui.getFocused() instanceof AskDialogComponent) return undefined;
+					this.ctx.handleHudCommand?.("toggle");
+					return { consume: true };
+				}
+				if (matchesKey(data, "alt+a")) {
+					if (this.ctx.ui.hasOverlay()) return undefined;
+					if (this.ctx.ui.getFocused() !== this.ctx.editor || this.ctx.focusedAgentId) return undefined;
+					if (this.ctx.toggleAllPredictions?.()) return { consume: true };
+				}
+				const altKeys = ["alt+1", "alt+2", "alt+3", "alt+4", "alt+5", "alt+6", "alt+7", "alt+8", "alt+9"] as const;
+				for (let i = 0; i < altKeys.length; i++) {
+					if (matchesKey(data, altKeys[i]!)) {
+						if (this.ctx.ui.hasOverlay()) return undefined;
+						if (this.ctx.ui.getFocused() !== this.ctx.editor || this.ctx.focusedAgentId) return undefined;
+						if (this.ctx.togglePredictionItem?.(i + 1)) return { consume: true };
+						break;
+					}
+				}
 				return undefined;
 			});
 		}
@@ -656,10 +686,15 @@ export class InputController {
 				this.#abortStreamingTurn();
 			} else if (this.ctx.editor.getText().trim()) {
 				// Esc must not destroy an in-progress draft.
+				if (this.ctx.editor.dismissInlineCompletion()) {
+					this.ctx.ui.requestRender();
+				} else {
+					this.ctx.clearSelectedPredictions?.();
+				}
+				this.ctx.lastEscapeTime = 0;
+			} else if (this.ctx.clearSelectedPredictions?.()) {
 				this.ctx.lastEscapeTime = 0;
 			} else {
-				// Double-interrupt with an empty editor runs the configured action:
-				// the transcript rewind selector (default) or the session tree.
 				const doubleEscapeAction = cfgDoubleEscapeAction.get(settings);
 				if (doubleEscapeAction !== "none") {
 					const now = Date.now();
@@ -868,6 +903,25 @@ export class InputController {
 		if (this.ctx.ui.hasOverlay()) return undefined;
 		const event = parseSgrMouse(data);
 		if (!event) return undefined;
+		if (event.wheel !== null) {
+			if (this.ctx.editor.isShowingAutocomplete()) {
+				this.ctx.editor.handleInput(event.wheel < 0 ? "\x1b[A" : "\x1b[B");
+				this.ctx.ui.requestRender();
+				return { consume: true };
+			}
+			if (this.ctx.editor.getText().includes("\n") && this.ctx.ui.getFocused() === this.ctx.editor) {
+				const vp = this.ctx.ui.getMutableViewport();
+				if (vp.length > 0 && event.row >= vp.top + Math.max(0, vp.length - 6)) {
+					this.ctx.editor.handleInput(event.wheel < 0 ? "\x1b[A" : "\x1b[B");
+					this.ctx.ui.requestRender();
+					return { consume: true };
+				}
+			}
+			if (event.wheel < 0) {
+				this.ctx.openWheelScrollback?.();
+			}
+			return { consume: true };
+		}
 		if (event.motion) this.#updateHoverHighlight(event.row);
 		else if (event.leftClick && !this.#activateClickedLink(event.row, event.col)) this.#focusClickedAgent(event.row);
 		return { consume: true };
@@ -1131,6 +1185,9 @@ export class InputController {
 					this.ctx.ui.requestRender();
 				}
 				return;
+			}
+			if (!this.ctx.focusedAgentId && this.ctx.consumePredictionSubmission) {
+				text = this.ctx.consumePredictionSubmission(text);
 			}
 
 			if (!text && !hasPendingImages) return;

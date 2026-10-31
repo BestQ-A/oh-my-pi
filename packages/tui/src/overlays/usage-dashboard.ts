@@ -29,6 +29,7 @@ import { colorToAnsi } from "../theme/color";
 import { ensureThemeSync, theme } from "../theme/theme";
 import { formatAbsoluteOnlyAmount } from "../prompt/usage-amounts";
 import { truncateMiddleToWidth } from "../render/render-utils";
+import { actionMarkerAt, formatActionMarker } from "../render/extension-links";
 import { sanitizeDisplayLine } from "./extensions/display-text";
 import {
 	matchesSelectCancel,
@@ -56,19 +57,43 @@ export interface DailyActivityPoint {
 // Subscriptions grid model
 // =============================================================================
 
-/** One quota bucket on a provider card: the account-aggregate of one window group. */
+/** One quota bucket row on a provider or per-account card. */
 export interface CardWindowRow {
 	/** Display label (limit label with tier folded in). */
 	label: string;
 	/** Window label/id shown dim after the label when sibling rows share a label. */
 	windowTag?: string;
-	/** Mean used fraction across accounts (0..1, >1 = overage); undefined when unreported. */
+	/** Used fraction (0..1, >1 = overage); undefined when unreported. */
 	fraction: number | undefined;
 	status: UsageLimit["status"];
-	/** Reset countdown of the worst account, ms from now, when in the future. */
+	/** Reset countdown in ms from now, when in the future. */
 	resetMs?: number;
+	/** Total window duration in ms, when known (used for Magpie linear burn pace). */
+	durationMs?: number;
+	/** Magpie pace delta (`usedPct - expectedLinearUsedPct`): >0 burning faster, <0 burning slower. */
+	paceDiffPct?: number;
+	/** Compact absolute count remaining (`3,980/4,000` or `$69/$100`) when reported. */
+	countLeftText?: string;
+	/** Compact absolute count used (`20/4,000` or `$31/$100`) when reported. */
+	countUsedText?: string;
 	/** Absolute one-sided amount (e.g. `$12.34 used`, `100 credits left`) for limits without a fraction. */
 	usedText?: string;
+}
+
+/** Per-account quota breakdown inside a multi-account (or single-account) provider card (Magpie `#panelQuota` idiom). */
+export interface AccountQuotaSection {
+	accountLabel: string;
+	planLabel?: string;
+	daybreak: boolean;
+	unlimited: boolean;
+	status: UsageLimit["status"];
+	windows: CardWindowRow[];
+	resetCredits?: {
+		bankedCount: number;
+		redeemableCount: number;
+		soonestExpiryMs?: number;
+		unavailableReasons: string[];
+	};
 }
 
 /** A connected account whose usage lookup produced no attributable report. */
@@ -84,13 +109,15 @@ export interface ProviderCard {
 	/** Number of represented accounts, including unavailable usage lookups. */
 	accounts: number;
 	unavailableAccounts: string[];
-	/** Window rows in provider-declared order (e.g. 5h → weekly → monthly); the fullest CARD_MAX_WINDOWS lead. */
+	/** Per-account un-averaged sections so multi-account pools never mislead with averaged percentages. */
+	accountSections: AccountQuotaSection[];
+	/** Window rows in provider-declared order (aggregate summary retained for callers/native tree). */
 	windows: CardWindowRow[];
 	/** True when every account reports no limits (e.g. enterprise plans, providers without a quota API). */
 	unlimited: boolean;
 	/** Distinct report notes across accounts (e.g. why a provider exposes no quota windows). */
 	notes: string[];
-	/** True when nothing is used anywhere (or there are no limits): collapses to a tick. */
+	/** True when nothing is used anywhere (or there are no limits). */
 	idle: boolean;
 	resetCredits?: {
 		bankedCount: number;
@@ -101,7 +128,6 @@ export interface ProviderCard {
 	/** Labels of accounts with verified Daybreak access. */
 	daybreakAccounts?: string[];
 }
-
 /**
  * Aggregate status across a bucket's limits, mirroring the classic report:
  * a mix of healthy and pressured accounts reads as a warning, not as the
@@ -142,6 +168,144 @@ function compactWindowTag(window: NonNullable<UsageLimit["window"]>): string {
 	}
 	const id = window.id.toLowerCase();
 	return id.length <= 3 ? id : id.slice(0, 1);
+}
+function computeMagpiePaceDiffPct(
+	usedFraction: number | undefined,
+	resetMs: number | undefined,
+	durationMs: number | undefined,
+): number | undefined {
+	if (
+		usedFraction === undefined ||
+		usedFraction <= 0 ||
+		resetMs === undefined ||
+		durationMs === undefined ||
+		!(durationMs > 0) ||
+		!(resetMs > 0) ||
+		resetMs >= durationMs
+	) {
+		return undefined;
+	}
+	const elapsedFraction = 1 - resetMs / durationMs;
+	// Avoid noisy pace figures in the first 5% of a window cycle (same spirit as Magpie's low-reading guard).
+	if (elapsedFraction < 0.05) return undefined;
+	return Math.round((usedFraction - elapsedFraction) * 100);
+}
+
+function formatWindowAbsoluteCounts(limit: UsageLimit): { left?: string; used?: string } {
+	const amt = limit.amount;
+	if (!amt) return {};
+	const total = amt.limit;
+	const unit = amt.unit;
+	if (typeof total !== "number" || !Number.isFinite(total) || total <= 0 || unit === "percent") {
+		return {};
+	}
+	const rem =
+		typeof amt.remaining === "number" && Number.isFinite(amt.remaining)
+			? Math.max(0, amt.remaining)
+			: typeof amt.used === "number" && Number.isFinite(amt.used)
+				? Math.max(0, total - amt.used)
+				: undefined;
+	const used =
+		typeof amt.used === "number" && Number.isFinite(amt.used)
+			? Math.max(0, amt.used)
+			: rem !== undefined
+				? Math.max(0, total - rem)
+				: undefined;
+	if (rem === undefined || used === undefined) return {};
+	if (unit === "usd") {
+		const fmtUsd = (n: number) => `$${n >= 10 && Number.isInteger(Math.round(n * 10) / 10) ? Math.round(n) : n.toFixed(1)}`;
+		return { left: `${fmtUsd(rem)}/${fmtUsd(total)}`, used: `${fmtUsd(used)}/${fmtUsd(total)}` };
+	}
+	const fmtInt = (n: number) => Math.round(n).toLocaleString("en-US");
+	return { left: `${fmtInt(rem)}/${fmtInt(total)}`, used: `${fmtInt(used)}/${fmtInt(total)}` };
+}
+
+function buildWindowsFromLimits(limits: readonly UsageLimit[], nowMs: number, maxVisible: number): CardWindowRow[] {
+	const buckets = new Map<string, { label: string; limits: UsageLimit[] }>();
+	for (const limit of limits) {
+		const label = formatLimitTitle(limit);
+		const key =
+			limit.scope.sharedGroup ??
+			`${label}|${limit.window?.id ?? limit.scope.windowId ?? "default"}|${limit.id}`;
+		const entry = buckets.get(key) ?? { label, limits: [] };
+		entry.limits.push(limit);
+		buckets.set(key, entry);
+	}
+	const declared: CardWindowRow[] = [...buckets.values()].map(bucket => {
+		const fractions = bucket.limits
+			.map(limit => resolveUsedFraction(limit))
+			.filter((value): value is number => value !== undefined);
+		const fraction =
+			fractions.length > 0 ? fractions.reduce((sum, value) => sum + value, 0) / fractions.length : undefined;
+		const worst = bucket.limits.reduce((max, limit) =>
+			(resolveUsedFraction(limit) ?? -1) > (resolveUsedFraction(max) ?? -1) ? limit : max,
+		);
+		const resetsAt = worst.window?.resetsAt;
+		const resetMs = resetsAt !== undefined && resetsAt > nowMs ? resetsAt - nowMs : undefined;
+		const durationMs = worst.window?.durationMs;
+		const counts = bucket.limits.length === 1 ? formatWindowAbsoluteCounts(worst) : {};
+		return {
+			label: bucket.label,
+			windowTag: worst.window ? compactWindowTag(worst.window) : undefined,
+			fraction,
+			status: aggregateStatus(bucket.limits),
+			resetMs,
+			durationMs,
+			paceDiffPct: computeMagpiePaceDiffPct(fraction, resetMs, durationMs),
+			countLeftText: counts.left,
+			countUsedText: counts.used,
+			usedText: fraction === undefined ? formatAbsoluteOnlyAmount(bucket.limits) : undefined,
+		};
+	});
+	const visible = new Set(
+		[...declared].sort((a, b) => (b.fraction ?? -1) - (a.fraction ?? -1)).slice(0, maxVisible),
+	);
+	const windows = [...declared.filter(row => visible.has(row)), ...declared.filter(row => !visible.has(row))];
+	for (const window of windows) {
+		const duplicated = windows.some(other => other !== window && other.label === window.label);
+		if (!duplicated) window.windowTag = undefined;
+	}
+	return windows;
+}
+
+function extractAccountSection(report: UsageReport, index: number, totalInProvider: number, nowMs: number): AccountQuotaSection {
+	const meta = report.metadata;
+	const email = typeof meta?.email === "string" && meta.email.trim() ? meta.email.trim() : undefined;
+	const accountId = typeof meta?.accountId === "string" && meta.accountId.trim() ? meta.accountId.trim() : undefined;
+	const planRaw =
+		typeof meta?.planType === "string" && meta.planType.trim()
+			? meta.planType.trim()
+			: typeof meta?.orgName === "string" && meta.orgName.trim()
+				? meta.orgName.trim()
+				: undefined;
+	const accountLabel = email ?? (accountId ? accountId.slice(0, 12) : totalInProvider > 1 ? `Account #${index + 1}` : "");
+	const planLabel = planRaw && planRaw.toLowerCase() !== accountLabel.toLowerCase() ? planRaw : undefined;
+	const windows = buildWindowsFromLimits(report.limits, nowMs, CARD_MAX_WINDOWS);
+	const resetSummary = summarizeUsageResetCredits(report.resetCredits, nowMs);
+	let resetCredits: AccountQuotaSection["resetCredits"];
+	if (resetSummary && resetSummary.bankedCount > 0) {
+		const expiryMs =
+			resetSummary.soonestExpiry !== undefined && Number.isFinite(Date.parse(resetSummary.soonestExpiry))
+				? Date.parse(resetSummary.soonestExpiry) - nowMs
+				: undefined;
+		resetCredits = {
+			bankedCount: resetSummary.bankedCount,
+			redeemableCount: resetSummary.redeemableCount,
+			soonestExpiryMs: expiryMs,
+			unavailableReasons: resetSummary.unavailableReason ? [resetSummary.unavailableReason] : [],
+		};
+	}
+	const unlimited = windows.length === 0;
+	const status: UsageLimit["status"] = unlimited ? "ok" : aggregateStatus(windows);
+	return {
+		accountLabel,
+		planLabel,
+		daybreak: meta?.daybreak === true,
+		unlimited,
+		status,
+		windows,
+		resetCredits,
+	};
 }
 
 /**
@@ -217,7 +381,7 @@ export function buildProviderCards(
 		// more, keep the fullest ones visible (still in declared order) so an
 		// exhausted bucket never hides behind "+N more".
 		const visible = new Set(
-			[...declared].sort((a, b) => (b.fraction ?? -1) - (a.fraction ?? -1)).slice(0, CARD_MAX_WINDOWS),
+			[...declared].sort((a, b) => (b.fraction ?? -1) - (a.fraction ?? -1)).slice(0, CARD_PRIORITY_LEAD_WINDOWS),
 		);
 		const windows = [...declared.filter(row => visible.has(row)), ...declared.filter(row => !visible.has(row))];
 		// The window tag earns its columns only when sibling rows would otherwise
@@ -266,12 +430,25 @@ export function buildProviderCards(
 					]
 				: [],
 		);
+		const accountSections = providerReports.map((report, idx) =>
+			extractAccountSection(report, idx, providerReports.length, nowMs),
+		);
+		if (accountSections.length > 1) {
+			// Order healthier / reset-backed accounts first so ready capacity leads at a glance.
+			accountSections.sort((a, b) => {
+				const aMinUsed = a.windows.reduce((min, w) => Math.min(min, w.fraction ?? 0), 1);
+				const bMinUsed = b.windows.reduce((min, w) => Math.min(min, w.fraction ?? 0), 1);
+				if (aMinUsed !== bMinUsed) return aMinUsed - bMinUsed;
+				return (b.resetCredits?.bankedCount ?? 0) - (a.resetCredits?.bankedCount ?? 0);
+			});
+		}
 		cards.push({
 			provider,
 			name: formatProviderName(provider),
 			accounts: providerReports.length + unavailable.length,
 			unavailableAccounts: unavailable,
 			windows,
+			accountSections,
 			unlimited: windows.length === 0 && unavailable.length === 0,
 			notes: [...new Set(providerReports.flatMap(report => report.notes ?? []))],
 			idle:
@@ -637,6 +814,12 @@ export interface UsageDashboardOptions {
 	loadActivity: (push: (points: DailyActivityPoint[]) => void, signal: AbortSignal) => Promise<void>;
 	/** Re-fetch the usage reports (`r`); omitted when the host can't. Resolves null when nothing came back. */
 	refresh?: () => Promise<UsageReport[] | null>;
+	/** Optional saved model presets rendered in the top presets bar (`[1]`..`[9]`). */
+	presets?: ReadonlyArray<{ name: string; active: boolean }>;
+	/** Switch active model preset when pressing `1`..`9` in the dashboard. */
+	onSwitchPreset?: (name: string) => Promise<{ ok: boolean; message: string; activeName?: string }>;
+	/** Launch or bring forward the standalone Desktop Quota HUD (`p` / `P`). */
+	onOpenDesktopHud?: () => Promise<string> | string;
 	requestRender: () => void;
 	onClose: () => void;
 }
@@ -658,9 +841,11 @@ export function formatActivityErrorDetail(error: string, homeDir = os.homedir())
 
 const CARD_MIN_WIDTH = 32;
 const CARD_GUTTER = 3;
-const CARD_MAX_WINDOWS = 4;
+const CARD_PRIORITY_LEAD_WINDOWS = 4;
+const CARD_MAX_WINDOWS = 10;
 const CARD_MIN_BAR_WIDTH = 12;
 const CARD_MAX_LABEL_LINES = 2;
+const PRESET_DIGIT_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9"] as const;
 
 interface CardRowLayout {
 	labelWidth: number;
@@ -676,6 +861,10 @@ export class UsageDashboardComponent implements Component {
 	#options: UsageDashboardOptions;
 	#reports: UsageReport[];
 	#cards: ProviderCard[];
+	#unavailableAccounts: readonly UnavailableUsageAccount[] | undefined;
+	#presets: Array<{ name: string; active: boolean }>;
+	#switchingPreset = false;
+	#actionBanner: string | null = null;
 	#nowMs: number;
 	#refreshing = false;
 	#refreshError: string | null = null;
@@ -683,6 +872,8 @@ export class UsageDashboardComponent implements Component {
 	#revision = 0;
 	#view: "overview" | "detail" = "overview";
 	#scroll = 0;
+	/** Magpie `quotaLeft` polarity: `true` = show Remaining (`剩余`), `false` = show Used (`已用`). */
+	#quotaLeft = true;
 	#activity: DailyActivityPoint[] | null = null;
 	#activityError: string | null = null;
 	#syncing = true;
@@ -691,6 +882,7 @@ export class UsageDashboardComponent implements Component {
 	#overviewCache: { revision: number; width: number; lines: string[] } | null = null;
 	#lastViewportRows = 10;
 	#closed = false;
+	#lastRenderedLines: readonly string[] = [];
 	readonly #panel: OverlayPanel;
 	readonly #header: PanelRows;
 	readonly #body: PanelRows;
@@ -702,8 +894,10 @@ export class UsageDashboardComponent implements Component {
 		ensureThemeSync();
 		this.#options = options;
 		this.#reports = options.reports;
+		this.#unavailableAccounts = options.unavailableAccounts;
+		this.#presets = options.presets ? options.presets.map(preset => ({ name: preset.name, active: preset.active })) : [];
 		this.#nowMs = Date.now();
-		this.#cards = buildProviderCards(this.#reports, this.#nowMs, options.unavailableAccounts);
+		this.#cards = buildProviderCards(this.#reports, this.#nowMs, this.#unavailableAccounts);
 		this.#panel = new OverlayPanel("Usage");
 		this.#header = new PanelRows();
 		this.#header.setHeight(1);
@@ -730,6 +924,20 @@ export class UsageDashboardComponent implements Component {
 			this.#syncing = false;
 			if (!this.#closed) this.#changed();
 		}
+	}
+
+	/** Push updated usage reports from an asynchronous background refresh while open. */
+	updateReports(reports: UsageReport[], unavailableAccounts?: readonly UnavailableUsageAccount[]): void {
+		if (this.#closed) return;
+		if (unavailableAccounts !== undefined) {
+			this.#unavailableAccounts = unavailableAccounts;
+		}
+		this.#reports = reports;
+		this.#nowMs = Date.now();
+		this.#cards = buildProviderCards(reports, this.#nowMs, this.#unavailableAccounts);
+		this.#detailCache = null;
+		this.#overviewCache = null;
+		this.#changed();
 	}
 
 	invalidate(): void {
@@ -762,16 +970,174 @@ export class UsageDashboardComponent implements Component {
 		return "dim";
 	}
 
-	#miniBar(fraction: number | undefined, status: UsageLimit["status"], width: number): string {
-		if (fraction === undefined) return theme.fg("dim", "·".repeat(width));
-		const clamped = Math.min(Math.max(fraction, 0), 1);
+	#miniBar(fillFraction: number | undefined, status: UsageLimit["status"], width: number): string {
+		if (fillFraction === undefined) return theme.fg("dim", "·".repeat(width));
+		const clamped = Math.min(Math.max(fillFraction, 0), 1);
 		const filled = Math.round(clamped * width);
 		const bar = "█".repeat(filled);
 		const empty = "░".repeat(width - filled);
 		return `${theme.fg(this.#statusColor(status), bar)}${theme.fg("dim", empty)}`;
 	}
 
-	#renderCardLines(card: ProviderCard, width: number, labels: string[][], layout: CardRowLayout): string[] {
+	#formatWindowDisplayLabel(window: CardWindowRow): string {
+		const base = sanitizeDisplayLine(window.label);
+		const countText = this.#quotaLeft ? window.countLeftText : window.countUsedText;
+		const withCount = countText ? `${base} (${sanitizeDisplayLine(countText)})` : base;
+		const formatted = theme.fg("muted", withCount);
+		const tag = window.windowTag ? sanitizeDisplayLine(window.windowTag) : "";
+		return tag ? `${formatted} ${theme.fg("dim", tag)}` : formatted;
+	}
+
+	#formatWindowResetAndPace(window: CardWindowRow, includePace: boolean): string {
+		if (window.fraction !== undefined && window.fraction <= 0.0005) {
+			return "未使用";
+		}
+		const resetPart = window.resetMs !== undefined ? formatDuration(window.resetMs) : "";
+		if (!includePace || window.paceDiffPct === undefined || Math.abs(window.paceDiffPct) < 8) {
+			return resetPart;
+		}
+		const diff = this.#quotaLeft ? -window.paceDiffPct : window.paceDiffPct;
+		const sign = diff > 0 ? "+" : diff < 0 ? "−" : "±";
+		const paceStr = `${sign}${Math.abs(diff)}%`;
+		return resetPart ? `${resetPart}·${paceStr}` : paceStr;
+	}
+
+	#renderResetCreditLines(
+		resets: NonNullable<ProviderCard["resetCredits"]>,
+		indent: string,
+		maxTextWidth: number,
+	): string[] {
+		const out: string[] = [];
+		let resetText = `↺ ${resets.bankedCount} reset${resets.bankedCount === 1 ? "" : "s"}`;
+		if (resets.redeemableCount !== resets.bankedCount) {
+			resetText += ` · ${resets.redeemableCount} usable`;
+		}
+		if (resets.soonestExpiryMs !== undefined) {
+			resetText +=
+				resets.soonestExpiryMs > 0 ? ` · expires ${formatDuration(resets.soonestExpiryMs)}` : " · expired";
+		}
+		out.push(
+			`${indent}${theme.fg(resets.redeemableCount > 0 ? "success" : "warning", truncateToWidth(resetText, maxTextWidth))}`,
+		);
+		if (resets.redeemableCount === 0 && resets.unavailableReasons.length > 0) {
+			const reason = sanitizeText(resets.unavailableReasons.join(" • ").replace(/[\r\n\t]+/g, " "));
+			out.push(`${indent}${theme.fg("dim", truncateToWidth(`unavailable: ${reason}`, maxTextWidth))}`);
+		}
+		return out;
+	}
+
+	#renderWindowBlock(
+		windows: readonly CardWindowRow[],
+		labelLines: string[][],
+		layout: CardRowLayout,
+		contentWidth: number,
+		indent: string,
+		showPolarityWord: boolean,
+		includePace: boolean,
+		keyPrefix: string,
+	): string[] {
+		const lines: string[] = [];
+		const hidden = windows.length - CARD_MAX_WINDOWS;
+		const { labelWidth, resetWidth, barWidth, stacked, labelHeights } = layout;
+		const polarityWord = showPolarityWord ? (this.#quotaLeft ? "余" : "用") : "";
+		const pctPadWidth = showPolarityWord ? 4 : 5;
+
+		for (let index = 0; index < Math.min(windows.length, CARD_MAX_WINDOWS); index++) {
+			const window = windows[index]!;
+			const rowLabels = labelLines[index] ?? [this.#formatWindowDisplayLabel(window)];
+			const label = rowLabels[0] ?? "";
+			const prefix = stacked ? "" : `${label}${" ".repeat(Math.max(0, labelWidth - visibleWidth(label)))} `;
+			if (stacked) {
+				const height = labelHeights[index] ?? rowLabels.length;
+				for (let line = 0; line < height; line++) {
+					lines.push(`${indent}${rowLabels[line] ?? ""}`);
+				}
+			}
+			if (window.fraction === undefined) {
+				const text = theme.fg("dim", window.usedText ?? "no data");
+				for (const line of wrapTextWithAnsi(`${prefix}${text}`, contentWidth)) lines.push(`${indent}${line}`);
+				continue;
+			}
+			const shownFraction = this.#quotaLeft ? Math.max(0, 1 - window.fraction) : Math.max(0, window.fraction);
+			const shownPct = Math.max(0, Math.round(shownFraction * 100));
+			const rawPct = showPolarityWord
+				? ` ${polarityWord}${`${shownPct}%`.padStart(pctPadWidth)}`
+				: `${shownPct}%`.padStart(5);
+			const pctText = theme.fg(this.#statusColor(window.status), rawPct);
+			const resetPlain = this.#formatWindowResetAndPace(window, includePace);
+			const resetColor = window.paceDiffPct !== undefined && window.paceDiffPct >= 10 ? "warning" : "dim";
+			const resetPad = " ".repeat(Math.max(0, resetWidth - visibleWidth(resetPlain)));
+			const resetText =
+				resetWidth > 0 ? ` ${theme.fg(resetColor, `${resetPad}${resetPlain}`)}` : "";
+			const meterBar = `${this.#miniBar(shownFraction, window.status, barWidth)}${pctText}`;
+			const clickableMeter = formatActionMarker(
+				meterBar,
+				"omp-overlay:toggle-polarity",
+				`${keyPrefix}:meter:${index}`,
+			);
+			for (const line of wrapTextWithAnsi(`${prefix}${clickableMeter}${resetText}`, contentWidth)) {
+				lines.push(`${indent}${line}`);
+			}
+		}
+		if (hidden > 0) lines.push(`${indent}${theme.fg("dim", `+${hidden} more`)}`);
+		return lines;
+	}
+
+	#computeWindowLayout(
+		windowGroups: ReadonlyArray<readonly CardWindowRow[]>,
+		cardWidth: number,
+		indentCols: number,
+		showPolarityWord: boolean,
+		includePace: boolean,
+	): { layout: CardRowLayout; labelLines: string[][][] } {
+		const labels = windowGroups.map(rows => rows.map(w => this.#formatWindowDisplayLabel(w)));
+		const labelWidth = labels.reduce(
+			(max, rows) => rows.reduce((w, label) => Math.max(w, visibleWidth(label)), max),
+			0,
+		);
+		const resetWidth = windowGroups.reduce(
+			(max, rows) =>
+				rows.reduce((w, win) => Math.max(w, visibleWidth(this.#formatWindowResetAndPace(win, includePace))), max),
+			0,
+		);
+		const contentWidth = Math.max(1, cardWidth - indentCols);
+		const pctWidth = showPolarityWord ? 7 : 5;
+		const suffixWidth = pctWidth + (resetWidth > 0 ? resetWidth + 1 : 0);
+		const inlineBarWidth = contentWidth - labelWidth - 1 - suffixWidth;
+		const stacked = inlineBarWidth < CARD_MIN_BAR_WIDTH;
+		const maxRows = Math.max(1, ...windowGroups.map(g => g.length));
+		const labelLines = labels.map(rows =>
+			rows.map(label => {
+				if (!stacked) return [label];
+				const bounded = truncateMiddleToWidth(label, contentWidth * CARD_MAX_LABEL_LINES);
+				const wrapped = wrapTextWithAnsi(bounded, contentWidth);
+				if (wrapped.length <= CARD_MAX_LABEL_LINES) return wrapped;
+				const first = sliceWithWidth(bounded, 0, contentWidth, true);
+				const rest = sliceWithWidth(bounded, first.width, visibleWidth(bounded) - first.width, true);
+				return [first.text, truncateMiddleToWidth(rest.text, contentWidth)];
+			}),
+		);
+		const labelHeights = Array.from({ length: maxRows }, (_, index) =>
+			Math.max(0, ...labelLines.map(rows => rows[index]?.length ?? 0)),
+		);
+		return {
+			layout: {
+				labelWidth,
+				resetWidth,
+				barWidth: Math.max(1, stacked ? contentWidth - suffixWidth : inlineBarWidth),
+				stacked,
+				labelHeights,
+			},
+			labelLines,
+		};
+	}
+
+	#renderCardLines(
+		card: ProviderCard,
+		width: number,
+		sharedSingleLabels?: string[][],
+		sharedSingleLayout?: CardRowLayout,
+	): string[] {
 		const lines: string[] = [];
 		const cardStatus =
 			card.unavailableAccounts.length > 0
@@ -785,28 +1151,80 @@ export class UsageDashboardComponent implements Component {
 		const titlePad = Math.max(0, width - 2 - visibleWidth(title) - visibleWidth(accountsText));
 		lines.push(`${this.#statusIcon(cardStatus)} ${title}${" ".repeat(titlePad)}${accountsText}`);
 
+		const showPolarityWord = width >= 32;
+		const includePace = width >= 40;
+
+		// Multi-account provider (Magpie `#panelQuota` idiom): render EVERY account separately
+		// with its own identity, its own reset credits, and its own un-averaged quota bars!
+		if (card.accountSections.length > 1) {
+			for (const [acctIdx, section] of card.accountSections.entries()) {
+				if (acctIdx > 0) {
+					lines.push(`  ${theme.fg("dim", "╌".repeat(Math.max(4, Math.min(24, width - 4))))}`);
+				}
+				const whoParts = [section.accountLabel, section.planLabel].filter(
+					(part): part is string => Boolean(part && part.trim()),
+				);
+				if (section.daybreak) whoParts.push("daybreak");
+				const whoRaw = sanitizeDisplayLine(whoParts.join(" · ") || `Account #${acctIdx + 1}`);
+				const whoLine = `${this.#statusIcon(section.status)} ${theme.fg("text", truncateToWidth(whoRaw, Math.max(4, width - 5)))}`;
+				lines.push(`  ${whoLine}`);
+
+				if (section.resetCredits) {
+					lines.push(...this.#renderResetCreditLines(section.resetCredits, "    ", Math.max(1, width - 4)));
+				}
+				if (section.unlimited) {
+					lines.push(`    ${theme.fg("dim", "no limits")}`);
+					continue;
+				}
+				const sliced = section.windows.slice(0, CARD_MAX_WINDOWS);
+				const { layout, labelLines } = this.#computeWindowLayout(
+					[sliced],
+					width,
+					4,
+					showPolarityWord,
+					includePace,
+				);
+				lines.push(
+					...this.#renderWindowBlock(
+						section.windows,
+						labelLines[0]!,
+						layout,
+						Math.max(1, width - 4),
+						"    ",
+						showPolarityWord,
+						includePace,
+						`${card.provider}:acct${acctIdx}`,
+					),
+				);
+			}
+			for (const account of card.unavailableAccounts) {
+				const text = sanitizeDisplayLine(`${account} — usage unavailable`);
+				for (const line of wrapTextWithAnsi(text, Math.max(1, width - 2))) {
+					lines.push(`  ${theme.fg("dim", line)}`);
+				}
+			}
+			return lines;
+		}
+
+		// Single-account provider card
+		const singleAcct = card.accountSections[0];
+		if (singleAcct && width >= 34) {
+			const subParts = [singleAcct.accountLabel, singleAcct.planLabel].filter(
+				(p): p is string => Boolean(p && p.trim()),
+			);
+			if (subParts.length > 0) {
+				const subClean = sanitizeDisplayLine(subParts.join(" · "));
+				lines.push(`  ${theme.fg("dim", truncateToWidth(subClean, Math.max(1, width - 2)))}`);
+			}
+		}
+
 		for (const account of card.daybreakAccounts ?? []) {
 			const label = sanitizeText(account.replace(/[\r\n\t]+/g, " "));
 			lines.push(`  ${theme.fg("success", truncateToWidth(`daybreak · ${label}`, width - 2))}`);
 		}
 
 		if (card.resetCredits) {
-			const resets = card.resetCredits;
-			let resetText = `✦ ${resets.bankedCount} reset${resets.bankedCount === 1 ? "" : "s"}`;
-			if (resets.redeemableCount !== resets.bankedCount) {
-				resetText += ` · ${resets.redeemableCount} usable`;
-			}
-			if (resets.soonestExpiryMs !== undefined) {
-				resetText +=
-					resets.soonestExpiryMs > 0 ? ` · expires ${formatDuration(resets.soonestExpiryMs)}` : " · expired";
-			}
-			lines.push(
-				`  ${theme.fg(resets.redeemableCount > 0 ? "success" : "warning", truncateToWidth(resetText, width - 2))}`,
-			);
-			if (resets.redeemableCount === 0 && resets.unavailableReasons.length > 0) {
-				const reason = sanitizeText(resets.unavailableReasons.join(" • ").replace(/[\r\n\t]+/g, " "));
-				lines.push(`  ${theme.fg("dim", truncateToWidth(`unavailable: ${reason}`, width - 2))}`);
-			}
+			lines.push(...this.#renderResetCreditLines(card.resetCredits, "  ", Math.max(1, width - 2)));
 		}
 
 		for (const account of card.unavailableAccounts) {
@@ -821,103 +1239,66 @@ export class UsageDashboardComponent implements Component {
 			return lines;
 		}
 
-		const hidden = card.windows.length - CARD_MAX_WINDOWS;
-		const { labelWidth, resetWidth, barWidth, stacked, labelHeights } = layout;
-		const contentWidth = Math.max(1, width - 2);
-		for (let index = 0; index < Math.min(card.windows.length, CARD_MAX_WINDOWS); index++) {
-			const window = card.windows[index]!;
-			const labelLines = labels[index]!;
-			const label = labelLines[0] ?? "";
-			const prefix = stacked ? "" : `${label}${" ".repeat(labelWidth - visibleWidth(label))} `;
-			if (stacked) {
-				for (let line = 0; line < labelHeights[index]; line++) {
-					lines.push(`  ${labelLines[line] ?? ""}`);
-				}
-			}
-			if (window.fraction === undefined) {
-				const text = theme.fg("dim", window.usedText ?? "no data");
-				for (const line of wrapTextWithAnsi(`${prefix}${text}`, contentWidth)) lines.push(`  ${line}`);
-				continue;
-			}
-			const freePct = Math.max(0, Math.round((1 - window.fraction) * 100));
-			const pctText = theme.fg(this.#statusColor(window.status), `${freePct}%`.padStart(5));
-			const resetPlain = window.resetMs !== undefined ? formatDuration(window.resetMs) : "";
-			const resetText = resetWidth > 0 ? ` ${theme.fg("dim", resetPlain.padStart(resetWidth))}` : "";
-			for (const line of wrapTextWithAnsi(
-				`${prefix}${this.#miniBar(window.fraction, window.status, barWidth)}${pctText}${resetText}`,
-				contentWidth,
-			)) {
-				lines.push(`  ${line}`);
-			}
+		let layout = sharedSingleLayout;
+		let labelLines = sharedSingleLabels;
+		if (!layout || !labelLines) {
+			const computed = this.#computeWindowLayout(
+				[card.windows.slice(0, CARD_MAX_WINDOWS)],
+				width,
+				2,
+				showPolarityWord,
+				includePace,
+			);
+			layout = computed.layout;
+			labelLines = computed.labelLines[0]!;
 		}
-		if (hidden > 0) lines.push(`  ${theme.fg("dim", `+${hidden} more`)}`);
+
+		lines.push(
+			...this.#renderWindowBlock(
+				card.windows,
+				labelLines,
+				layout,
+				Math.max(1, width - 2),
+				"  ",
+				showPolarityWord,
+				includePace,
+				card.provider,
+			),
+		);
 		return lines;
 	}
 
 	#renderCardsGrid(innerWidth: number): string[] {
 		if (this.#cards.length === 0) return [theme.fg("dim", "No usage data available.")];
-		const active = this.#cards.filter(card => !card.idle);
-		const idle = this.#cards.filter(card => card.idle);
+		// Show ALL metered cards (including 100%-remaining untouched pools) so nothing is hidden
+		// behind an "untouched:" footnote; only truly windowless `unlimited` cards collapse below.
+		const metered = this.#cards.filter(card => !card.unlimited);
+		const unmetered = this.#cards.filter(card => card.unlimited);
 		const columns = Math.max(1, Math.floor((innerWidth + CARD_GUTTER) / (CARD_MIN_WIDTH + CARD_GUTTER)));
 		const cardWidth = Math.floor((innerWidth - (columns - 1) * CARD_GUTTER) / columns);
+		const showPolarityWord = cardWidth >= 32;
+		const includePace = cardWidth >= 40;
 		const lines: string[] = [];
-		for (let start = 0; start < active.length; start += columns) {
-			const cards = active.slice(start, start + columns);
-			const windows = cards.map(card => card.windows.slice(0, CARD_MAX_WINDOWS));
-			const labels = windows.map(rows =>
-				rows.map(window => {
-					const label = theme.fg("muted", sanitizeDisplayLine(window.label));
-					const tag = window.windowTag ? sanitizeDisplayLine(window.windowTag) : "";
-					return tag ? `${label} ${theme.fg("dim", tag)}` : label;
-				}),
-			);
-			// One geometry per grid row: labels, bars, and resets share columns,
-			// and every card stacks together when inline bars would be too short.
-			const labelWidth = labels.reduce(
-				(max, rows) => rows.reduce((width, label) => Math.max(width, visibleWidth(label)), max),
-				0,
-			);
-			const resetWidth = windows.reduce(
-				(max, rows) =>
-					rows.reduce(
-						(width, window) =>
-							Math.max(width, window.resetMs !== undefined ? formatDuration(window.resetMs).length : 0),
-						max,
-					),
-				0,
-			);
-			const contentWidth = Math.max(1, cardWidth - 2);
-			const suffixWidth = 5 + (resetWidth > 0 ? resetWidth + 1 : 0);
-			const inlineBarWidth = contentWidth - labelWidth - 1 - suffixWidth;
-			const stacked = inlineBarWidth < CARD_MIN_BAR_WIDTH;
-			const labelLines = labels.map(rows =>
-				rows.map(label => {
-					if (!stacked) return [label];
-					// Bound wrapping work as well as height, keeping the suffix that
-					// distinguishes model-specific quota buckets.
-					const bounded = truncateMiddleToWidth(label, contentWidth * CARD_MAX_LABEL_LINES);
-					const lines = wrapTextWithAnsi(bounded, contentWidth);
-					if (lines.length <= CARD_MAX_LABEL_LINES) return lines;
-					// Word wrapping can waste enough cells to create a third line even
-					// when the label fits. Use a grapheme-safe column split in that case.
-					const first = sliceWithWidth(bounded, 0, contentWidth, true);
-					const rest = sliceWithWidth(bounded, first.width, visibleWidth(bounded) - first.width, true);
-					return [first.text, truncateMiddleToWidth(rest.text, contentWidth)];
-				}),
-			);
-			const labelHeights = Array.from({ length: CARD_MAX_WINDOWS }, (_, index) =>
-				Math.max(0, ...labelLines.map(rows => rows[index]?.length ?? 0)),
-			);
-			const layout: CardRowLayout = {
-				labelWidth,
-				resetWidth,
-				barWidth: Math.max(1, stacked ? contentWidth - suffixWidth : inlineBarWidth),
-				stacked,
-				labelHeights,
-			};
-			const rowCards = cards.map((card, index) =>
-				this.#renderCardLines(card, cardWidth, labelLines[index]!, layout),
-			);
+
+		for (let start = 0; start < metered.length; start += columns) {
+			const cards = metered.slice(start, start + columns);
+			const allSingleAccount = cards.every(card => card.accountSections.length <= 1);
+			let rowCards: string[][];
+			if (allSingleAccount) {
+				const windows = cards.map(card => card.windows.slice(0, CARD_MAX_WINDOWS));
+				const { layout, labelLines } = this.#computeWindowLayout(
+					windows,
+					cardWidth,
+					2,
+					showPolarityWord,
+					includePace,
+				);
+				rowCards = cards.map((card, index) =>
+					this.#renderCardLines(card, cardWidth, labelLines[index]!, layout),
+				);
+			} else {
+				rowCards = cards.map(card => this.#renderCardLines(card, cardWidth));
+			}
 			const height = Math.max(...rowCards.map(card => card.length));
 			for (let lineIdx = 0; lineIdx < height; lineIdx++) {
 				const segments = rowCards.map(card => {
@@ -926,15 +1307,13 @@ export class UsageDashboardComponent implements Component {
 				});
 				lines.push(segments.join(" ".repeat(CARD_GUTTER)).trimEnd());
 			}
-			if (start + columns < active.length) lines.push("");
+			if (start + columns < metered.length) lines.push("");
 		}
-		// Untouched providers collapse into a single tick line: their windows
-		// are all at 100% free (or have no limits), so per-window bars are noise.
-		if (idle.length > 0) {
-			if (active.length > 0) lines.push("");
-			const names = idle.map(card => card.name).join(" · ");
+		if (unmetered.length > 0) {
+			if (metered.length > 0) lines.push("");
+			const names = unmetered.map(card => card.name).join(" · ");
 			const prefix = `${theme.fg("success", theme.status.success)} `;
-			lines.push(truncateToWidth(`${prefix}${theme.fg("dim", `untouched: ${names}`)}`, innerWidth));
+			lines.push(truncateToWidth(`${prefix}${theme.fg("dim", `no limits: ${names}`)}`, innerWidth));
 		}
 		return lines;
 	}
@@ -1011,10 +1390,70 @@ export class UsageDashboardComponent implements Component {
 	// Frame
 	// ---------------------------------------------------------------------------
 
+	#renderPresetsBar(innerWidth: number): string[] {
+		const lines: string[] = [];
+		const visiblePresets = this.#presets.slice(0, PRESET_DIGIT_KEYS.length);
+		if (visiblePresets.length > 0) {
+			const heading = `${theme.bold(theme.fg("accent", "Presets"))}  `;
+			const continuationIndent = " ".repeat(visibleWidth(heading));
+			const separator = "   ";
+			const items = visiblePresets.map((preset, index) => {
+				const cleanName = sanitizeDisplayLine(preset.name);
+				const keyLabel = `[${index + 1}]`;
+				const itemText = preset.active
+					? `${theme.fg("accent", keyLabel)} ${theme.fg("success", "●")} ${theme.bold(theme.fg("accent", cleanName))}`
+					: `${theme.fg("dim", keyLabel)} ${theme.fg("dim", "○")} ${theme.fg("muted", cleanName)}`;
+				return formatActionMarker(itemText, `omp-overlay:preset:${index}`, `preset-${index}`);
+			});
+			let currentLine = heading;
+			let hasItemOnLine = false;
+			for (const item of items) {
+				const candidate = hasItemOnLine ? `${currentLine}${separator}${item}` : `${currentLine}${item}`;
+				if (hasItemOnLine && visibleWidth(candidate) > innerWidth) {
+					lines.push(truncateToWidth(currentLine, innerWidth));
+					currentLine = `${continuationIndent}${item}`;
+				} else {
+					currentLine = candidate;
+					hasItemOnLine = true;
+				}
+			}
+			if (hasItemOnLine) {
+				lines.push(truncateToWidth(currentLine, innerWidth));
+			}
+		}
+		if (innerWidth >= 44) {
+			const leftOpt = this.#quotaLeft
+				? `${theme.fg("success", "●")} ${theme.bold(theme.fg("success", "剩余 Left"))}`
+				: `${theme.fg("dim", "○")} ${theme.fg("muted", "剩余 Left")}`;
+			const usedOpt = !this.#quotaLeft
+				? `${theme.fg("warning", "●")} ${theme.bold(theme.fg("warning", "已用 Used"))}`
+				: `${theme.fg("dim", "○")} ${theme.fg("muted", "已用 Used")}`;
+			const togglePill = formatActionMarker(
+				`[${leftOpt} ⇄ ${usedOpt}]`,
+				"omp-overlay:toggle-polarity",
+				"header-toggle-polarity",
+			);
+			lines.push(
+				truncateToWidth(
+					`${theme.fg("muted", "额度视角:")} ${togglePill} ${theme.fg("dim", "(点击或按 u 切换 · 多账号独立展示 · 滚轮滑动)")}`,
+					innerWidth,
+				),
+			);
+		}
+		if (this.#actionBanner) {
+			lines.push(truncateToWidth(theme.fg("accent", `↳ ${sanitizeDisplayLine(this.#actionBanner)}`), innerWidth));
+		}
+		return lines;
+	}
+
 	#overviewLines(innerWidth: number): string[] {
 		const cached = this.#overviewCache;
 		if (cached?.revision === this.#revision && cached.width === innerWidth) return cached.lines;
 		const lines: string[] = [];
+		const presetLines = this.#renderPresetsBar(innerWidth);
+		if (presetLines.length > 0) {
+			lines.push(...presetLines, "");
+		}
 		lines.push(...this.#renderCardsGrid(innerWidth));
 		lines.push("");
 		lines.push(...this.#renderHeatmap(innerWidth));
@@ -1036,10 +1475,18 @@ export class UsageDashboardComponent implements Component {
 		const height = Math.max(14, process.stdout.rows || 40);
 		const innerWidth = Math.max(20, width - 4);
 
-		const contentSource = this.#view === "detail" ? this.#detailLines(innerWidth) : this.#overviewLines(innerWidth);
+		const hasScrollbar = this.#view === "overview" && innerWidth >= 40;
+		// Compute content once; if it overflows, reserve 2 cols on the right for a visual scrollbar.
+		let bodyWidth = innerWidth;
+		let contentSource = this.#view === "detail" ? this.#detailLines(bodyWidth) : this.#overviewLines(bodyWidth);
 		// Fixed chrome: top border, blank, content…, divider, hint, bottom border.
 		const contentRows = Math.max(5, height - 5);
 		this.#lastViewportRows = contentRows;
+		const overflows = hasScrollbar && contentSource.length > contentRows;
+		if (overflows) {
+			bodyWidth = Math.max(20, innerWidth - 2);
+			contentSource = this.#view === "detail" ? this.#detailLines(bodyWidth) : this.#overviewLines(bodyWidth);
+		}
 		const maxScroll = Math.max(0, contentSource.length - contentRows);
 		if (this.#scroll > maxScroll) this.#scroll = maxScroll;
 
@@ -1049,21 +1496,59 @@ export class UsageDashboardComponent implements Component {
 			: latestFetchedAt
 				? `checked ${formatDuration(this.#nowMs - latestFetchedAt)} ago`
 				: "";
-		const title = this.#view === "detail" ? "Usage · Details" : "Usage";
+		const modeLabel = this.#quotaLeft ? "剩余" : "已用";
+		const title = this.#view === "detail" ? "Usage · Details" : `Usage · ${modeLabel}`;
 
-		const scrollHint = maxScroll > 0 ? `${editorKeys("tui.select.up", "tui.select.down")} scroll · ` : "";
+		const scrollHint = maxScroll > 0 ? `${editorKeys("tui.select.up", "tui.select.down")}/滚轮 scroll · ` : "";
 		const cancel = editorKey("tui.select.cancel");
-		const refreshHint = this.#options.refresh ? "r refresh · " : "";
+		const presetMax = Math.min(PRESET_DIGIT_KEYS.length, this.#presets.length);
+		const presetHint = presetMax > 0 ? (presetMax === 1 ? "1 preset · " : `1-${presetMax} preset · `) : "";
+		const polarityHint =
+			this.#view === "overview"
+				? `${formatActionMarker(`u ${this.#quotaLeft ? "切已用" : "切剩余"}`, "omp-overlay:toggle-polarity", "footer-polarity")} · `
+				: "";
+		const hudHint = this.#options.onOpenDesktopHud
+			? `${formatActionMarker("p desktop HUD", "omp-overlay:desktop-hud", "footer-desktop-hud")} · `
+			: "";
+		const refreshHint = this.#options.refresh
+			? `${formatActionMarker("r refresh", "omp-overlay:refresh", "footer-refresh")} · `
+			: "";
 		const hint =
 			this.#view === "detail"
-				? `${scrollHint}${refreshHint}${formatKeyHint("tab")} overview · ${cancel} back`
-				: `${scrollHint}${refreshHint}${formatKeyHint("enter")} details · ${cancel} close`;
+				? `${scrollHint}${presetHint}${hudHint}${refreshHint}${formatKeyHint("tab")} overview · ${formatActionMarker(`${cancel} back`, "omp-overlay:overview", "footer-overview")}`
+				: `${scrollHint}${presetHint}${hudHint}${refreshHint}${polarityHint}${formatActionMarker(`${formatKeyHint("enter")} details`, "omp-overlay:detail", "footer-detail")} · ${formatActionMarker(`${cancel} close`, "omp-overlay:close", "footer-close")}`;
 		this.#panel.title = title;
-		this.#header.setLines([checkedText ? theme.fg("dim", checkedText) : ""]);
-		this.#body.setLines(contentSource.slice(this.#scroll, this.#scroll + contentRows));
+		const headerParts: string[] = [];
+		if (checkedText) headerParts.push(theme.fg("dim", checkedText));
+		if (maxScroll > 0) {
+			const startRow = this.#scroll + 1;
+			const endRow = Math.min(contentSource.length, this.#scroll + contentRows);
+			headerParts.push(theme.fg("dim", `行 ${startRow}–${endRow}/${contentSource.length}`));
+		}
+		if (this.#actionBanner) headerParts.push(theme.fg("accent", sanitizeDisplayLine(this.#actionBanner)));
+		this.#header.setLines([headerParts.length > 0 ? truncateToWidth(headerParts.join("  ·  "), innerWidth) : ""]);
+
+		const visibleSlice = contentSource.slice(this.#scroll, this.#scroll + contentRows);
+		if (overflows && contentSource.length > 0) {
+			const thumbHeight = Math.max(1, Math.round((contentRows / contentSource.length) * contentRows));
+			const maxThumbTop = Math.max(0, contentRows - thumbHeight);
+			const thumbTop = maxScroll > 0 ? Math.round((this.#scroll / maxScroll) * maxThumbTop) : 0;
+			const withBar = Array.from({ length: contentRows }, (_, idx) => {
+				const rowText = visibleSlice[idx] ?? "";
+				const padCols = Math.max(0, bodyWidth - visibleWidth(rowText));
+				const isThumb = idx >= thumbTop && idx < thumbTop + thumbHeight;
+				const barGlyph = isThumb ? theme.fg("accent", "█") : theme.fg("dim", "│");
+				return `${rowText}${" ".repeat(padCols)} ${barGlyph}`;
+			});
+			this.#body.setLines(withBar);
+		} else {
+			this.#body.setLines(visibleSlice);
+		}
 		this.#body.setHeight(contentRows);
-		this.#footer.setLines([theme.fg("dim", hint)]);
-		return this.#panel.render(width);
+		this.#footer.setLines([truncateToWidth(theme.fg("dim", hint), innerWidth)]);
+		const rendered = this.#panel.render(width);
+		this.#lastRenderedLines = rendered;
+		return rendered;
 	}
 
 	// ---------------------------------------------------------------------------
@@ -1104,6 +1589,7 @@ export class UsageDashboardComponent implements Component {
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (event.type === "action") {
 			if (event.act === "refresh") void this.#refresh();
+			else if (event.act === "desktop-hud") this.#openDesktopHud();
 			else if (event.act === "close") this.#close();
 			return;
 		}
@@ -1134,6 +1620,15 @@ export class UsageDashboardComponent implements Component {
 				text([span("ago", "dim")]),
 			);
 		}
+		if (!this.#refreshing && !this.#refreshError && this.#actionBanner) {
+			if (checked.length > 0) checked.push(text([span("·", "dim")]));
+			checked.push(
+				text([span(sanitizeDisplayLine(this.#actionBanner), "accent")], {
+					truncate: "end",
+					title: sanitizeDisplayLine(this.#actionBanner),
+				}),
+			);
+		}
 		const children: NativeChild[] = [
 			segmentedTabs(
 				{
@@ -1148,6 +1643,7 @@ export class UsageDashboardComponent implements Component {
 			node("spacer", { grow: 1 }),
 			node("row", { gap: "xs", align: "baseline", shrink: 1 }, checked, "checked"),
 		];
+		if (this.#options.onOpenDesktopHud) children.push(actionButton("Desktop HUD", "desktop-hud", { keys: "p" }));
 		if (this.#options.refresh) children.push(actionButton("Refresh", "refresh", { keys: "r" }));
 		return node("row", { role: "omp.usage.head", gap: "md", align: "center" }, children, "head");
 	}
@@ -1752,7 +2248,7 @@ export class UsageDashboardComponent implements Component {
 			if (reports) {
 				this.#reports = reports;
 				this.#nowMs = Date.now();
-				this.#cards = buildProviderCards(reports, this.#nowMs, this.#options.unavailableAccounts);
+				this.#cards = buildProviderCards(reports, this.#nowMs, this.#unavailableAccounts);
 				this.#detailCache = null;
 			}
 		} catch (error) {
@@ -1780,12 +2276,106 @@ export class UsageDashboardComponent implements Component {
 		this.#changed();
 	}
 
+	async #switchPresetByIndex(index: number): Promise<void> {
+		const onSwitch = this.#options.onSwitchPreset;
+		const preset = this.#presets[index];
+		if (!onSwitch || !preset || this.#refreshing || this.#switchingPreset || this.#closed) return;
+		this.#switchingPreset = true;
+		this.#actionBanner = `Switching to preset "${preset.name}"…`;
+		this.#changed();
+		try {
+			const res = await onSwitch(preset.name);
+			if (this.#closed) return;
+			if (res.ok) {
+				const activeTarget = res.activeName ?? preset.name;
+				this.#presets = this.#presets.map(entry => ({
+					name: entry.name,
+					active: entry.name === activeTarget,
+				}));
+			} else if (res.activeName !== undefined) {
+				this.#presets = this.#presets.map(entry => ({
+					name: entry.name,
+					active: entry.name === res.activeName,
+				}));
+			}
+			this.#actionBanner = res.message;
+		} catch (error) {
+			this.#actionBanner = `Preset switch failed: ${error instanceof Error ? error.message : String(error)}`;
+		} finally {
+			this.#switchingPreset = false;
+			if (!this.#closed) this.#changed();
+		}
+	}
+
+	#openDesktopHud(): void {
+		const onOpen = this.#options.onOpenDesktopHud;
+		if (!onOpen || this.#closed) return;
+		try {
+			const result = onOpen();
+			if (typeof result === "string") {
+				this.#actionBanner = result;
+				this.#changed();
+				return;
+			}
+			void result.then(
+				message => {
+					if (this.#closed) return;
+					this.#actionBanner = message;
+					this.#changed();
+				},
+				(error: unknown) => {
+					if (this.#closed) return;
+					this.#actionBanner = `Desktop HUD failed: ${error instanceof Error ? error.message : String(error)}`;
+					this.#changed();
+				},
+			);
+		} catch (error) {
+			this.#actionBanner = `Desktop HUD failed: ${error instanceof Error ? error.message : String(error)}`;
+			this.#changed();
+		}
+	}
+
 	handleInput(data: string): void {
 		if (
 			routeSgrMouseInput(data, event => {
-				if (event.wheel === null) return false;
-				this.#scrollBy(event.wheel * 2);
-				return true;
+				if (event.wheel !== null) {
+					this.#scrollBy(event.wheel * 4);
+					return true;
+				}
+				if (event.leftClick) {
+					const act = actionMarkerAt(this.#lastRenderedLines[event.row] ?? "", event.col);
+					if (!act) return false;
+					if (act.startsWith("omp-overlay:preset:")) {
+						const idx = Number(act.slice("omp-overlay:preset:".length));
+						if (Number.isInteger(idx) && idx >= 0 && !this.#refreshing) {
+							void this.#switchPresetByIndex(idx);
+						}
+						return true;
+					}
+					switch (act) {
+						case "omp-overlay:refresh":
+							void this.#refresh();
+							return true;
+						case "omp-overlay:toggle-polarity":
+							this.#togglePolarity();
+							return true;
+						case "omp-overlay:desktop-hud":
+							this.#openDesktopHud();
+							return true;
+						case "omp-overlay:detail":
+							this.#setView("detail");
+							return true;
+						case "omp-overlay:overview":
+							this.#setView("overview");
+							return true;
+						case "omp-overlay:close":
+							this.#close();
+							return true;
+						default:
+							return false;
+					}
+				}
+				return false;
 			})
 		) {
 			return;
@@ -1806,6 +2396,26 @@ export class UsageDashboardComponent implements Component {
 			this.#setView(this.#view === "overview" ? "detail" : "overview");
 			return;
 		}
+		if (this.#view === "overview" && (matchesKey(data, "u") || matchesKey(data, "shift+u") || data === "U")) {
+			this.#togglePolarity();
+			return;
+		}
+		if (matchesKey(data, "alt+q")) {
+			this.#close();
+			return;
+		}
+		if (this.#options.onOpenDesktopHud && (matchesKey(data, "p") || matchesKey(data, "shift+p") || data === "P")) {
+			this.#openDesktopHud();
+			return;
+		}
+		for (let idx = 0; idx < PRESET_DIGIT_KEYS.length && idx < this.#presets.length; idx++) {
+			if (matchesKey(data, PRESET_DIGIT_KEYS[idx]!)) {
+				if (!this.#refreshing) {
+					void this.#switchPresetByIndex(idx);
+				}
+				return;
+			}
+		}
 		if (this.#view === "overview" && (matchesKey(data, "return") || matchesKey(data, "d"))) {
 			this.#setView("detail");
 			return;
@@ -1818,6 +2428,11 @@ export class UsageDashboardComponent implements Component {
 			this.#scroll = 0;
 			this.#options.requestRender();
 		} else if (matchesKey(data, "end")) this.#scrollBy(Number.MAX_SAFE_INTEGER);
+	}
+	#togglePolarity(): void {
+		this.#quotaLeft = !this.#quotaLeft;
+		this.#overviewCache = null;
+		this.#changed();
 	}
 
 	#close(): void {

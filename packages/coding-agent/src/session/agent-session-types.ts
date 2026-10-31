@@ -657,6 +657,8 @@ export interface EphemeralTurnOptions {
 	maxTokens?: number;
 	/** Run at the model's lowest effort where the provider carries the change as a per-message control that keeps the prompt cache (Anthropic per-message effort, OpenAI `configuration_update`) and the session thinks. Elsewhere the session's reasoning applies, since changing request-level reasoning forfeits the cache. */
 	minimizeEffort?: boolean;
+	/** Force reasoning/thinking completely off for latency-critical side turns (e.g. input-box auto-predictions). */
+	disableReasoning?: boolean;
 	/** Positive safe-integer UTF-8 byte cap. Reject before inference when the serialized post-transform, secret-obfuscated provider context exceeds it. Measured before `before_provider_request` hooks; payload replacements are not re-measured. */
 	maxContextBytes?: number;
 	/** Awaited in order; a delivery failure rejects the side turn and aborts the request. */

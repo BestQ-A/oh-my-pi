@@ -582,6 +582,56 @@ describe("UsageDashboardComponent", () => {
 		}
 	});
 
+	it("renders multi-account providers per-account without misleading 50% averaging and toggles Left/Used polarity", () => {
+		const now = Date.now();
+		const exhaustedAcct: UsageReport = {
+			provider: "openai-codex",
+			fetchedAt: now,
+			limits: [limit("openai-codex", "acct1", "7d", "7 days", 1.0, "warning", now + 3 * 86_400_000)],
+			resetCredits: { availableCount: 0 },
+			metadata: { email: "m17098999990@gmail.com", planType: "promax" },
+		};
+		const fullAcct: UsageReport = {
+			provider: "openai-codex",
+			fetchedAt: now,
+			limits: [limit("openai-codex", "acct2", "7d", "7 days", 0.0, "ok", now + 4 * 86_400_000)],
+			resetCredits: {
+				availableCount: 1,
+				credits: [{ id: "r1", remainingCount: 1, expiresAt: new Date(now + 6 * 86_400_000).toISOString() }],
+			},
+			metadata: { email: "skylarisgodofworld@gmail.com", planType: "pro" },
+		};
+
+		const component = dashboard([exhaustedAcct, fullAcct]);
+		try {
+			const leftView = Bun.stripANSI(component.render(100).join("\n"));
+			// Never renders a misleading averaged "50%"
+			expect(leftView).not.toContain("50%");
+			expect(leftView).toContain("skylarisgodofworld@gmail.com · pro");
+			expect(leftView).toContain("↺ 1 reset");
+			expect(leftView).toContain("余100%");
+			expect(leftView).toContain("未使用");
+			expect(leftView).toContain("m17098999990@gmail.com · promax");
+			expect(leftView).toContain("余  0%");
+
+			// Bar polarity matches Remaining %: the 100% row is all █, the 0% row is all ░
+			const barRowsLeft = leftView.split("\n").filter(l => /[█░]{8,}/.test(l));
+			expect(barRowsLeft).toHaveLength(2);
+			expect(barRowsLeft[0]).toMatch(/█{8,}.*余100%/);
+			expect(barRowsLeft[1]).toMatch(/░{8,}.*余  0%/);
+
+			// Pressing 'u' flips polarity to Used (`用  0%` empty bar, `用100%` full bar)
+			component.handleInput("u");
+			const usedView = Bun.stripANSI(component.render(100).join("\n"));
+			const barRowsUsed = usedView.split("\n").filter(l => /[█░]{8,}/.test(l));
+			expect(barRowsUsed).toHaveLength(2);
+			expect(barRowsUsed[0]).toMatch(/░{8,}.*用  0%/);
+			expect(barRowsUsed[1]).toMatch(/█{8,}.*用100%/);
+		} finally {
+			component.dispose();
+		}
+	});
+
 	it("returns to overview on escape or q from detail, and closes on escape or q from overview", () => {
 		for (const key of ["\x1b", "q"]) {
 			let closed = 0;

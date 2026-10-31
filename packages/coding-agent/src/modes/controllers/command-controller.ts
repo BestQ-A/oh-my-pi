@@ -32,6 +32,13 @@ import { parseExportArgs } from "../../export/html/args";
 import { shareSession } from "../../export/share";
 import type { CompactOptions } from "../../extensibility/extensions/types";
 import {
+	canUseDefaultFinopsUsageCache,
+	launchDesktopQuotaHud,
+	readCachedFinopsUsageReports,
+	seedStatusLineQuotaPools,
+	writeCachedFinopsUsageReports,
+} from "../quota-hud-bridge";
+import {
 	diffMentalModelContent,
 	type HindsightClientApi,
 	type HindsightSessionState,
@@ -114,7 +121,7 @@ import {
 import { formatRemainingOnlyTotal, isUsedOnlyAbsoluteAmount } from "@oh-my-pi/pi-tui/prompt/usage-amounts";
 import type { UnavailableUsageAccount } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
 
-import { cfgTerminalShowImages } from "../settings";
+import { cfgComposerMarginHud, cfgTerminalShowImages } from "../settings";
 import { cfgProviderAppendOnlyContext } from "../../session/settings";
 import { cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "../../commands/settings";
 import { flagConsumesValue, restartArgv } from "../../cli/flag-tables";
@@ -924,19 +931,127 @@ export class CommandController {
 	async handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {
 		let usageReports = reports ?? null;
 		if (!usageReports) {
-			const provider = this.ctx.session as { fetchUsageReports?: () => Promise<UsageReport[] | null> };
-			if (!provider.fetchUsageReports) {
+			const session = this.ctx.session;
+			if (!("fetchUsageReports" in session) || typeof session.fetchUsageReports !== "function") {
 				this.ctx.showWarning("Usage reporting is not configured for this session.");
 				return;
 			}
 			try {
-				usageReports = await provider.fetchUsageReports();
+				usageReports = await session.fetchUsageReports();
+				if (usageReports && usageReports.length > 0) {
+					if (canUseDefaultFinopsUsageCache()) {
+						writeCachedFinopsUsageReports(usageReports);
+					}
+					seedStatusLineQuotaPools(this.ctx.statusLine, usageReports);
+				}
 			} catch (error) {
 				this.ctx.showError(`Failed to fetch usage data: ${error instanceof Error ? error.message : String(error)}`);
 			}
 		}
 
 		this.ctx.showUsageDashboard(usageReports ?? []);
+	}
+
+	async handleQuotaCommand(subcommand = ""): Promise<void> {
+		const verb = subcommand.trim().toLowerCase();
+		if (verb === "popup" || verb === "hud" || verb === "full") {
+			const res = launchDesktopQuotaHud("full");
+			if (res.ok) this.ctx.showStatus(res.message);
+			else this.ctx.showWarning(res.message);
+			return;
+		}
+		if (verb === "mini") {
+			const res = launchDesktopQuotaHud("mini");
+			if (res.ok) this.ctx.showStatus(res.message);
+			else this.ctx.showWarning(res.message);
+			return;
+		}
+		if (verb === "toggle") {
+			const res = launchDesktopQuotaHud("toggle");
+			if (res.ok) this.ctx.showStatus(res.message);
+			else this.ctx.showWarning(res.message);
+			return;
+		}
+		if (verb === "close") {
+			const res = launchDesktopQuotaHud("close");
+			if (res.ok) this.ctx.showStatus(res.message);
+			else this.ctx.showWarning(res.message);
+			return;
+		}
+
+		const session = this.ctx.session;
+		const hasFetch = "fetchUsageReports" in session && typeof session.fetchUsageReports === "function";
+		if (verb === "refresh") {
+			if (!hasFetch) {
+				this.ctx.showWarning("Usage reporting is not configured for this session.");
+				return;
+			}
+			try {
+				const fresh = await session.fetchUsageReports();
+				if (fresh && fresh.length > 0) {
+					if (canUseDefaultFinopsUsageCache()) {
+						writeCachedFinopsUsageReports(fresh);
+					}
+					seedStatusLineQuotaPools(this.ctx.statusLine, fresh);
+					this.ctx.updateUsageDashboard?.(fresh);
+				}
+				launchDesktopQuotaHud("refresh");
+				const count = fresh?.length ?? 0;
+				this.ctx.showStatus(`Refreshed quota pools (${count} account report${count === 1 ? "" : "s"}).`);
+			} catch (error) {
+				this.ctx.showError(`Failed to refresh quota data: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			return;
+		}
+
+		const cached = canUseDefaultFinopsUsageCache() ? readCachedFinopsUsageReports() : [];
+		if (cached.length > 0) {
+			seedStatusLineQuotaPools(this.ctx.statusLine, cached);
+			this.ctx.showUsageDashboard(cached);
+			if (hasFetch) {
+				void session
+					.fetchUsageReports()
+					.then(fresh => {
+						if (!fresh || fresh.length === 0) return;
+						if (canUseDefaultFinopsUsageCache()) {
+							writeCachedFinopsUsageReports(fresh);
+						}
+						seedStatusLineQuotaPools(this.ctx.statusLine, fresh);
+						this.ctx.updateUsageDashboard?.(fresh);
+					})
+					.catch(() => {
+						// Keep cached reports visible when background probe fails.
+					});
+			}
+			return;
+		}
+
+		await this.handleUsageCommand();
+	}
+
+	handleHudCommand(mode = "toggle"): void {
+		const verb = mode.trim().toLowerCase() || "toggle";
+		if (verb === "refresh") {
+			this.ctx.showStatus("Refreshed 4-Edge Margin HUD telemetry.");
+			this.ctx.ui.requestRender();
+			return;
+		}
+		let next: boolean;
+		if (verb === "on") {
+			next = true;
+		} else if (verb === "off") {
+			next = false;
+		} else if (verb === "toggle") {
+			next = !cfgComposerMarginHud.get(this.ctx.settings);
+		} else {
+			this.ctx.showWarning("Usage: /hud [on|off|toggle|refresh]");
+			return;
+		}
+		cfgComposerMarginHud.override(this.ctx.settings, next);
+		this.ctx.showStatus(
+			next ? "4-Edge Margin HUD enabled (Alt+H toggles)." : "4-Edge Margin HUD hidden (Alt+H toggles).",
+		);
+		this.ctx.ui.requestRender();
 	}
 
 	async handleChangelogCommand(args = ""): Promise<void> {

@@ -33,6 +33,13 @@ describe("parseComposerPrediction", () => {
 		expect(parseComposerPrediction('use "bun test" here')).toBe('use "bun test" here');
 	});
 
+	it("normalizes single-line and multi-line numbered menus with double-space separators", () => {
+		expect(parseComposerPrediction("1. 跑全量测试\n2. 查看 git diff\n3. 提交改动")).toBe(
+			"1. 跑全量测试  2. 查看 git diff  3. 提交改动",
+		);
+		expect(parseComposerPrediction("1. 跑测试   2. 看 diff")).toBe("1. 跑测试  2. 看 diff");
+	});
+
 	it("rejects skips, empty replies, and rambling", () => {
 		expect(parseComposerPrediction("NO_PREDICTION")).toBeUndefined();
 		expect(parseComposerPrediction("NO_PREDICTION.")).toBeUndefined();
