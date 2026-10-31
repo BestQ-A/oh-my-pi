@@ -21,6 +21,7 @@ import { syntheticUsageProvider } from "./synthetic";
 import { umansUsageProvider } from "./umans";
 import { xaiOauthRankingStrategy, xaiOauthUsageProvider } from "./xai-oauth";
 import { zaiRankingStrategy, zaiUsageProvider } from "./zai";
+import { zhipuCodingPlanRankingStrategy, zhipuCodingPlanUsageProvider } from "./zhipu-coding-plan";
 
 /** Resolves the usage-based ranking strategy for a provider. */
 export type RankingStrategyResolver = (provider: Provider) => CredentialRankingStrategy | undefined;
@@ -40,6 +41,7 @@ export const DEFAULT_USAGE_PROVIDERS: readonly UsageProvider[] = [
 	claudeUsageProvider,
 	clinePassUsageProvider,
 	zaiUsageProvider,
+	zhipuCodingPlanUsageProvider,
 	umansUsageProvider,
 	opencodeGoUsageProvider,
 	githubCopilotUsageProvider,
@@ -69,6 +71,7 @@ const DEFAULT_RANKING_STRATEGIES = new Map<Provider, CredentialRankingStrategy>(
 	["factory-droid", factoryDroidRankingStrategy],
 	["kimi-code", kimiRankingStrategy],
 	["zai", zaiRankingStrategy],
+	["zhipu-coding-plan", zhipuCodingPlanRankingStrategy],
 	["opencode-go", opencodeGoRankingStrategy],
 	["xai-oauth", xaiOauthRankingStrategy],
 	["commandcode", commandCodeRankingStrategy],

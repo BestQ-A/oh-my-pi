@@ -41,7 +41,8 @@ async function makeProfileDir(): Promise<string> {
  * is fixed (to delay it, or to fail it in transit or with a rejection);
  * `onStop` runs when a stop is requested and returns the state the daemon ends
  * in (default `exited`); `onStart` runs once a launch is recorded, where
- * Chrome starts.
+ * Chrome starts, and may override the recorded snapshot (an exited launcher,
+ * a missing readiness match); `probeStatus` decides what a CDP probe answers.
  */
 function fakeSharedBroker(
 	projectDir: string,
@@ -49,7 +50,8 @@ function fakeSharedBroker(
 	hooks: {
 		onDescribe?: () => Promise<void>;
 		onStop?: () => Promise<DaemonState | undefined>;
-		onStart?: () => Promise<void>;
+		onStart?: () => Promise<Partial<DaemonSnapshot> | void>;
+		probeStatus?: (url: string) => number | null;
 	} = {},
 ): { client: DaemonBrokerClient; starts: number; restore(): void } {
 	let daemon: DaemonSnapshot | undefined;
@@ -57,7 +59,7 @@ function fakeSharedBroker(
 	const launch = async (name: string): Promise<DaemonSnapshot> => {
 		broker.starts++;
 		const now = Date.now();
-		const launched: DaemonSnapshot = {
+		let launched: DaemonSnapshot = {
 			name,
 			id: "fake",
 			state: "ready",
@@ -71,7 +73,8 @@ function fakeSharedBroker(
 			detached: false,
 		};
 		daemon = launched;
-		await hooks.onStart?.();
+		const override = await hooks.onStart?.();
+		if (override) daemon = launched = { ...launched, ...override };
 		return launched;
 	};
 	const unknown = (name: string) => new DaemonBrokerRejectedError(`Unknown daemon ${name}`);
@@ -90,7 +93,9 @@ function fakeSharedBroker(
 				case "list":
 					return { op: "list", daemons: daemon ? [daemon] : [] };
 				case "start":
-					if (daemon) {
+					// The real broker replaces a terminal record; a live one is a
+					// start race it rejects.
+					if (daemon && daemon.state !== "exited" && daemon.state !== "failed") {
 						throw new DaemonBrokerRejectedError(`Daemon ${operation.spec.name} is already ${daemon.state}`);
 					}
 					return { op: "start", daemon: await launch(operation.spec.name), readyTimedOut: false };
@@ -120,7 +125,9 @@ function fakeSharedBroker(
 			executablePath: "/fake/chrome",
 			args: [],
 		}),
-		spyOn(browserAttach, "probeCdpStatus").mockResolvedValue(200),
+		spyOn(browserAttach, "probeCdpStatus").mockImplementation(async url =>
+			hooks.probeStatus ? hooks.probeStatus(url) : 200,
+		),
 	);
 	return broker;
 }
@@ -400,6 +407,88 @@ describe("shared Chromium session-restore state", () => {
 			expect(await fs.promises.readdir(sessionsDir)).toEqual(["Session_13436325114290429"]);
 			expect(broker.starts).toBe(2);
 		} finally {
+			broker.restore();
+			await fs.promises.rm(daemonRuntimeDir(projectDir), { recursive: true, force: true });
+			await fs.promises.rm(projectDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("Windows chrome.exe launcher hand-off", () => {
+	it("adopts the endpoint Chrome published on the profile, and never a stale one", async () => {
+		const projectDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-shared-published-"));
+		const name = sharedBrowserDaemonName(true);
+		const profileDir = path.join(daemonRuntimeDir(projectDir), `${name}.profile`);
+		const publishedFile = path.join(profileDir, "DevToolsActivePort");
+		const brokerEndpoint = "ws://127.0.0.1:9222/devtools/browser/ready";
+		const liveEndpoint = "ws://127.0.0.1:9333/devtools/browser/handoff";
+		let launcherExited = false;
+		let stops = 0;
+		const seed = browserLaunch.seedOwnedProfilePreferences;
+		const discard = browserLaunch.discardOwnedProfileSessions;
+		let seeds = 0;
+		let discards = 0;
+		const broker = fakeSharedBroker(projectDir, brokerEndpoint, {
+			async onStart() {
+				if (!launcherExited) return;
+				// Windows: the launcher exits 0 as the browser child takes over, so
+				// the broker records an exited daemon with neither the readiness
+				// line nor an endpoint. The child publishes its listener instead,
+				// in the same round the start replied in.
+				await Bun.write(publishedFile, "9333\n/devtools/browser/handoff\n");
+				return { state: "exited" as const, readyAt: undefined, readyMatch: undefined, exitCode: 0 };
+			},
+			async onStop() {
+				stops++;
+				return "exited";
+			},
+			probeStatus: url => (url.includes(":9444/") ? null : 200),
+		});
+		const seedSpy = spyOn(browserLaunch, "seedOwnedProfilePreferences").mockImplementation(async dir => {
+			seeds++;
+			await seed(dir);
+		});
+		const discardSpy = spyOn(browserLaunch, "discardOwnedProfileSessions").mockImplementation(async dir => {
+			discards++;
+			await discard(dir);
+		});
+		try {
+			// A file left by a stopped Chrome is not evidence of a live browser: it
+			// is probed, answers nothing, and the normal cleanup and cold start run.
+			await Bun.write(publishedFile, "9444\n/devtools/browser/stale\n");
+			expect((await ensureSharedBrowser({ projectDir, headless: true }))?.wsEndpoint).toBe(brokerEndpoint);
+			expect(broker.starts).toBe(1);
+			expect(seeds).toBe(1);
+			expect(discards).toBe(1);
+			expect(stops).toBe(0);
+
+			// The record ends while the Chrome child the launcher started stays up
+			// and publishes its endpoint: the client adopts it in the same round,
+			// without starting a second browser on the running profile or stopping
+			// the one it just adopted.
+			await broker.client.request({ op: "stop", name, timeoutMs: 5_000 });
+			expect(stops).toBe(1);
+			launcherExited = true;
+			expect((await ensureSharedBrowser({ projectDir, headless: true }))?.wsEndpoint).toBe(liveEndpoint);
+			expect(broker.starts).toBe(2);
+			expect(stops).toBe(1);
+
+			// The next acquire adopts the same browser again, without rewriting the
+			// Preferences or discarding the sessions of the Chrome that stayed up.
+			await Bun.write(path.join(profileDir, "Default", "Sessions", "Session_13436291949708538"), "live chrome");
+			const seedsBefore = seeds;
+			const discardsBefore = discards;
+			expect((await ensureSharedBrowser({ projectDir, headless: true }))?.wsEndpoint).toBe(liveEndpoint);
+			expect(broker.starts).toBe(2);
+			expect(stops).toBe(1);
+			expect(seeds).toBe(seedsBefore);
+			expect(discards).toBe(discardsBefore);
+			expect(await fs.promises.readdir(path.join(profileDir, "Default", "Sessions"))).toEqual([
+				"Session_13436291949708538",
+			]);
+		} finally {
+			seedSpy.mockRestore();
+			discardSpy.mockRestore();
 			broker.restore();
 			await fs.promises.rm(daemonRuntimeDir(projectDir), { recursive: true, force: true });
 			await fs.promises.rm(projectDir, { recursive: true, force: true });

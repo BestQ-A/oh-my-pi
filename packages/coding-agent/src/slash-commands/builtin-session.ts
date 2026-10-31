@@ -40,6 +40,28 @@ import { StatsNotice } from "@oh-my-pi/pi-tui/overlays/stats-notice";
 import { handleTodoAcp } from "./helpers/todo";
 import { buildUsageReportText } from "./helpers/usage-report";
 import type { SlashCommandRuntime, SlashCommandSpec } from "./types";
+import {
+	canUseDefaultFinopsUsageCache,
+	launchDesktopQuotaHud,
+	writeCachedFinopsUsageReports,
+} from "../modes/quota-hud-bridge";
+import { cfgComposerMarginHud } from "../modes/settings";
+
+const QUOTA_SUBCOMMANDS: Record<string, true> = {
+	show: true,
+	popup: true,
+	hud: true,
+	mini: true,
+	close: true,
+	refresh: true,
+};
+
+const HUD_SUBCOMMANDS: Record<string, true> = {
+	on: true,
+	off: true,
+	toggle: true,
+	refresh: true,
+};
 
 async function handleUsageResetCommand(
 	arg: string,
@@ -434,6 +456,111 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				return;
 			}
 			runtime.ctx.showStatus("Usage: /usage [show|reset [provider/credential-id|provider/active]]");
+			clearSubmittedText(runtime);
+		},
+	},
+	{
+		name: "quota",
+		icon: "gauge",
+		description: "Open live multi-pool quota overlay or desktop HUD",
+		acpDescription: "Show or control multi-pool quota HUD",
+		acpInputHint: "[show|popup|hud|mini|close|refresh]",
+		subcommands: [
+			{ name: "show", description: "Open TUI multi-pool quota overlay (0ms cached + live refresh)" },
+			{ name: "popup", description: "Launch Windows always-on-top Desktop Quota HUD (full cards)" },
+			{ name: "hud", description: "Launch Windows always-on-top Desktop Quota HUD (full cards)" },
+			{ name: "mini", description: "Launch Windows Desktop Quota HUD in Mini Capsule Strip mode" },
+			{ name: "close", description: "Close Windows Desktop Quota HUD" },
+			{ name: "refresh", description: "Force live usage probe and update cache, status bar, and HUD" },
+		],
+		subcommandOptional: true,
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const { verb, rest } = parseSubcommand(command.args);
+			if (!verb || (verb === "show" && !rest)) {
+				await runtime.output(await buildUsageReportText(runtime));
+				return commandConsumed();
+			}
+			if ((verb === "popup" || verb === "hud") && !rest) {
+				const res = launchDesktopQuotaHud("full");
+				await runtime.output(res.message);
+				return commandConsumed({ failed: !res.ok });
+			}
+			if (verb === "mini" && !rest) {
+				const res = launchDesktopQuotaHud("mini");
+				await runtime.output(res.message);
+				return commandConsumed({ failed: !res.ok });
+			}
+			if (verb === "close" && !rest) {
+				const res = launchDesktopQuotaHud("close");
+				await runtime.output(res.message);
+				return commandConsumed({ failed: !res.ok });
+			}
+			if (verb === "refresh" && !rest) {
+				const fresh = await runtime.session.fetchUsageReports();
+				if (fresh && fresh.length > 0 && canUseDefaultFinopsUsageCache()) {
+					writeCachedFinopsUsageReports(fresh);
+				}
+				launchDesktopQuotaHud("refresh");
+				const count = fresh?.length ?? 0;
+				await runtime.output(`Refreshed quota pools (${count} account report${count === 1 ? "" : "s"}).`);
+				return commandConsumed();
+			}
+			return usage("Usage: /quota [show|popup|hud|mini|close|refresh]", runtime);
+		},
+		handleTui: async (command, runtime) => {
+			const { verb, rest } = parseSubcommand(command.args);
+			if (!rest && (!verb || Object.hasOwn(QUOTA_SUBCOMMANDS, verb))) {
+				if (runtime.ctx.handleQuotaCommand) {
+					await runtime.ctx.handleQuotaCommand(verb || "show");
+				} else if (!verb || verb === "show") {
+					await runtime.ctx.handleUsageCommand();
+				}
+				clearSubmittedText(runtime);
+				return;
+			}
+			runtime.ctx.showStatus("Usage: /quota [show|popup|hud|mini|close|refresh]");
+			clearSubmittedText(runtime);
+		},
+	},
+	{
+		name: "hud",
+		icon: "gauge",
+		description: "Toggle or refresh the 4-Edge Terminal Margin HUD around the composer",
+		acpDescription: "Toggle 4-Edge Margin HUD",
+		acpInputHint: "[on|off|toggle|refresh]",
+		subcommands: [
+			{ name: "toggle", description: "Toggle the 4-Edge Margin HUD on or off (Alt+H)" },
+			{ name: "on", description: "Show the 4-Edge Margin HUD around the composer" },
+			{ name: "off", description: "Hide the 4-Edge Margin HUD around the composer" },
+			{ name: "refresh", description: "Force refresh hardware, git, daemon, and quota HUD telemetry" },
+		],
+		subcommandOptional: true,
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const { verb, rest } = parseSubcommand(command.args);
+			if (!rest && (!verb || Object.hasOwn(HUD_SUBCOMMANDS, verb))) {
+				const action = verb || "toggle";
+				if (action === "refresh") {
+					await runtime.output("Refreshed 4-Edge Margin HUD telemetry.");
+					return commandConsumed();
+				}
+				const next =
+					action === "on" ? true : action === "off" ? false : !cfgComposerMarginHud.get(runtime.settings);
+				cfgComposerMarginHud.override(runtime.settings, next);
+				await runtime.output(next ? "4-Edge Margin HUD enabled." : "4-Edge Margin HUD hidden.");
+				return commandConsumed();
+			}
+			return usage("Usage: /hud [on|off|toggle|refresh]", runtime);
+		},
+		handleTui: (command, runtime) => {
+			const { verb, rest } = parseSubcommand(command.args);
+			if (!rest && (!verb || Object.hasOwn(HUD_SUBCOMMANDS, verb))) {
+				runtime.ctx.handleHudCommand?.(verb || "toggle");
+				clearSubmittedText(runtime);
+				return;
+			}
+			runtime.ctx.showStatus("Usage: /hud [on|off|toggle|refresh]");
 			clearSubmittedText(runtime);
 		},
 	},

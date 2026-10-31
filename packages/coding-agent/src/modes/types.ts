@@ -525,6 +525,13 @@ export interface InteractiveModeContext {
 	handleAdvisorStatusCommand(): Promise<void>;
 	handleJobsCommand(options?: { full?: boolean }): Promise<void>;
 	handleUsageCommand(reports?: UsageReport[] | null): Promise<void>;
+	handleQuotaCommand?(subcommand?: string): Promise<void>;
+	handleHudCommand?(mode?: string): void;
+	toggleAllPredictions?(): boolean;
+	togglePredictionItem?(index: number): boolean;
+	clearSelectedPredictions?(): boolean;
+	consumePredictionSubmission?(editorText: string): string;
+	openWheelScrollback?(): boolean;
 	handleChangelogCommand(args?: string): Promise<void>;
 	handleHotkeysCommand(): void;
 	handleToolsCommand(): void;
@@ -582,6 +589,7 @@ export interface InteractiveModeContext {
 	showSettingsSelector(): void;
 	/** Open the fullscreen `/usage` dashboard overlay for the given reports. */
 	showUsageDashboard(reports: UsageReport[]): void;
+	updateUsageDashboard?(reports: UsageReport[]): void;
 	showAdvisorConfigure(): void;
 	showHistorySearch(): void;
 	showExtensionsDashboard(): void;

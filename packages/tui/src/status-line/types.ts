@@ -206,6 +206,18 @@ export interface SegmentContext {
 			expiring?: StatusResetExpiry;
 		};
 	} | null;
+	quotaPools?: readonly QuotaPoolCapsule[];
+}
+
+/** Compact multi-provider quota summary capsule rendered by the `quota_pools` status-line segment. */
+export interface QuotaPoolCapsule {
+	provider: string;
+	shortLabel: string;
+	remainingPct: number;
+	resetText?: string;
+	bankedResets?: number;
+	active?: boolean;
+	severity: "ok" | "warning" | "error";
 }
 
 /** How close an account's saved resets are to expiring, when it is worth a warning. */

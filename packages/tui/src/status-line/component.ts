@@ -19,6 +19,7 @@ import {
 	visibleWidth,
 } from "../index";
 import { adjustHsv, formatNumber, getProjectDir, hexToRgb, rgbToHex } from "@oh-my-pi/pi-utils";
+import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import type {
 	ActiveRepoContext,
 	StatusAccountIdentity as OAuthAccountIdentity,
@@ -51,6 +52,7 @@ import type {
 	ComposerFacts,
 	ComposerFactsSource,
 	EffectiveStatusLineSettings,
+	QuotaPoolCapsule,
 	SegmentView,
 	SeparatorDef,
 	StatusLineSegmentId,
@@ -64,7 +66,13 @@ import type {
 const JOBS_SEGMENT_SPARK_CELLS = 8;
 
 /** What a click on a native status segment asks omp to open. */
-export type StatusLineNativeAction = "status.model" | "status.context" | "status.git" | "status.cost" | "status.path";
+export type StatusLineNativeAction =
+	| "status.model"
+	| "status.context"
+	| "status.git"
+	| "status.cost"
+	| "status.quota"
+	| "status.path";
 
 /** Click action per native segment: quick model picker, `/context`, `/git`, `/usage`, the project directory. */
 const NATIVE_SEGMENT_ACTIONS: Partial<Record<string, StatusLineNativeAction>> = {
@@ -73,6 +81,7 @@ const NATIVE_SEGMENT_ACTIONS: Partial<Record<string, StatusLineNativeAction>> = 
 	context_total: "status.context",
 	git: "status.git",
 	cost: "status.cost",
+	quota_pools: "status.cost",
 	path: "status.path",
 };
 
@@ -109,6 +118,415 @@ const COMPOSER_HOMED_SEGMENTS: Partial<Record<StatusLineSegmentId, true>> = {
 export interface StatusLinePullRequest {
 	readonly number: number;
 	readonly url: string;
+}
+
+const QUOTA_PROVIDER_SHORT_LABELS: Record<string, string> = {
+	"google-antigravity": "AG",
+	"zhipu-coding-plan": "GLM",
+	"minimax-code": "MM",
+	"minimax-code-cn": "MM",
+	"openai-codex": "CDX",
+	cursor: "CUR",
+	anthropic: "CLD",
+	"alibaba-token-plan": "QWN",
+	"kimi-code": "KIMI",
+	devin: "DEV",
+	"opencode-go": "OC",
+};
+
+const QUOTA_PRIMARY_WINDOW_DURATIONS_MS: Record<string, number> = {
+	"5h": 5 * 3_600_000,
+	daily: 86_400_000,
+	"24h": 86_400_000,
+	"1d": 86_400_000,
+	"7d": 7 * 86_400_000,
+	weekly: 7 * 86_400_000,
+	monthly: 30 * 86_400_000,
+	"30d": 30 * 86_400_000,
+	"1mo": 30 * 86_400_000,
+};
+
+const QUOTA_AUXILIARY_SCOPE_KEYS: Record<string, true> = {
+	video: true,
+	image: true,
+	audio: true,
+	music: true,
+	speech: true,
+	tts: true,
+	zread: true,
+	search: true,
+};
+
+interface ParsedQuotaWindow {
+	id: string;
+	label: string;
+	windowId?: string;
+	scopeModelId?: string;
+	remainingPct: number;
+	resetsAt?: number;
+	durationMs: number;
+	isPrimaryWindow: boolean;
+	isAuxiliary: boolean;
+}
+
+function extractQuotaRemainingPct(amount: Record<string, unknown>): number | null {
+	let rawPct: number | null = null;
+	if (typeof amount.remainingFraction === "number" && Number.isFinite(amount.remainingFraction)) {
+		rawPct = amount.remainingFraction * 100;
+	} else if (typeof amount.usedFraction === "number" && Number.isFinite(amount.usedFraction)) {
+		rawPct = (1 - amount.usedFraction) * 100;
+	} else if (
+		typeof amount.remaining === "number" &&
+		Number.isFinite(amount.remaining) &&
+		typeof amount.limit === "number" &&
+		Number.isFinite(amount.limit) &&
+		amount.limit > 0
+	) {
+		rawPct = (amount.remaining / amount.limit) * 100;
+	} else if (
+		typeof amount.used === "number" &&
+		Number.isFinite(amount.used) &&
+		typeof amount.limit === "number" &&
+		Number.isFinite(amount.limit) &&
+		amount.limit > 0
+	) {
+		rawPct = ((amount.limit - amount.used) / amount.limit) * 100;
+	} else if (amount.unit === "percent") {
+		if (typeof amount.remaining === "number" && Number.isFinite(amount.remaining)) {
+			rawPct = amount.remaining;
+		} else if (typeof amount.used === "number" && Number.isFinite(amount.used)) {
+			rawPct = 100 - amount.used;
+		}
+	}
+	return rawPct === null ? null : Math.max(0, Math.min(100, Math.round(rawPct)));
+}
+
+function parseQuotaWindow(rawLimit: unknown): ParsedQuotaWindow | null {
+	if (!isRecord(rawLimit)) return null;
+	const amount = isRecord(rawLimit.amount) ? rawLimit.amount : null;
+	if (!amount) return null;
+	const remainingPct = extractQuotaRemainingPct(amount);
+	if (remainingPct === null) return null;
+	const id = typeof rawLimit.id === "string" ? rawLimit.id : "";
+	const label = typeof rawLimit.label === "string" ? rawLimit.label : "";
+	const scope = isRecord(rawLimit.scope) ? rawLimit.scope : null;
+	const window = isRecord(rawLimit.window) ? rawLimit.window : null;
+	const rawWindowId =
+		scope && typeof scope.windowId === "string"
+			? scope.windowId
+			: window && typeof window.id === "string"
+				? window.id
+				: undefined;
+	const windowId = rawWindowId?.trim().toLowerCase() || undefined;
+	const scopeModelId =
+		scope && typeof scope.modelId === "string" && scope.modelId.trim()
+			? scope.modelId.trim().toLowerCase()
+			: undefined;
+	const scopeTier =
+		scope && typeof scope.tier === "string" && scope.tier.trim() ? scope.tier.trim().toLowerCase() : undefined;
+	const resetsAt =
+		window && typeof window.resetsAt === "number" && Number.isFinite(window.resetsAt) ? window.resetsAt : undefined;
+	const explicitDuration =
+		window && typeof window.durationMs === "number" && Number.isFinite(window.durationMs) && window.durationMs > 0
+			? window.durationMs
+			: undefined;
+	const inferredDuration = windowId !== undefined ? QUOTA_PRIMARY_WINDOW_DURATIONS_MS[windowId] : undefined;
+	const durationMs = explicitDuration ?? inferredDuration ?? Number.POSITIVE_INFINITY;
+	const isPrimaryWindow =
+		(windowId !== undefined && QUOTA_PRIMARY_WINDOW_DURATIONS_MS[windowId] !== undefined) ||
+		Number.isFinite(durationMs);
+	const isAuxiliary =
+		(scopeModelId !== undefined && QUOTA_AUXILIARY_SCOPE_KEYS[scopeModelId] === true) ||
+		(scopeTier !== undefined && QUOTA_AUXILIARY_SCOPE_KEYS[scopeTier] === true) ||
+		/\b(video|image|audio|music|speech|tts|zread)\b/i.test(`${id} ${label}`);
+	return {
+		id,
+		label,
+		windowId,
+		scopeModelId,
+		remainingPct,
+		resetsAt,
+		durationMs,
+		isPrimaryWindow,
+		isAuxiliary,
+	};
+}
+
+function pickMostConstrainingQuotaWindow(candidates: readonly ParsedQuotaWindow[]): ParsedQuotaWindow {
+	let best = candidates[0];
+	for (let i = 1; i < candidates.length; i++) {
+		const candidate = candidates[i];
+		if (candidate.remainingPct !== best.remainingPct) {
+			if (candidate.remainingPct < best.remainingPct) best = candidate;
+			continue;
+		}
+		if (candidate.durationMs !== best.durationMs) {
+			if (candidate.durationMs < best.durationMs) best = candidate;
+			continue;
+		}
+		const bestReset = best.resetsAt ?? Number.POSITIVE_INFINITY;
+		const candidateReset = candidate.resetsAt ?? Number.POSITIVE_INFINITY;
+		if (candidateReset < bestReset) {
+			best = candidate;
+		}
+	}
+	return best;
+}
+
+function pickAccountQuotaWindow(
+	provider: string,
+	windows: readonly ParsedQuotaWindow[],
+	activeProvider?: string,
+	activeModelId?: string,
+): ParsedQuotaWindow | null {
+	if (windows.length === 0) return null;
+
+	if (provider === "google-antigravity") {
+		const wantsClaudeOrGpt =
+			activeProvider === "google-antigravity" &&
+			typeof activeModelId === "string" &&
+			/claude|gpt/i.test(activeModelId);
+		if (wantsClaudeOrGpt) {
+			const claudeGptWindows = windows.filter(w => /claude|gpt|anthropic|openai|3p/i.test(`${w.label} ${w.id}`));
+			if (claudeGptWindows.length > 0) return pickMostConstrainingQuotaWindow(claudeGptWindows);
+		} else {
+			const geminiWindows = windows.filter(w => /gemini/i.test(`${w.label} ${w.id}`));
+			if (geminiWindows.length > 0) return pickMostConstrainingQuotaWindow(geminiWindows);
+		}
+		const nonZero = windows.filter(w => w.remainingPct > 0);
+		if (nonZero.length > 0) {
+			return nonZero.reduce((best, cur) => (cur.remainingPct > best.remainingPct ? cur : best));
+		}
+		return pickMostConstrainingQuotaWindow(windows);
+	}
+
+	if (provider === "zhipu-coding-plan") {
+		const fiveHourTokenWindows = windows.filter(
+			w => !w.isAuxiliary && (w.windowId === "5h" || /5\s*hours?\s*token|tokens:5h/i.test(`${w.label} ${w.id}`)),
+		);
+		if (fiveHourTokenWindows.length > 0) return pickMostConstrainingQuotaWindow(fiveHourTokenWindows);
+		const nonAux = windows.filter(w => !w.isAuxiliary);
+		return pickMostConstrainingQuotaWindow(nonAux.length > 0 ? nonAux : windows);
+	}
+
+	if (provider === "cursor") {
+		const cursorModelsWindows = windows.filter(w => /cursor\s*models|individual-auto/i.test(`${w.label} ${w.id}`));
+		const cursorModelsAvailable = cursorModelsWindows.filter(w => w.remainingPct > 0);
+		if (cursorModelsAvailable.length > 0) return pickMostConstrainingQuotaWindow(cursorModelsAvailable);
+		const anyAvailable = windows.filter(w => w.remainingPct > 0);
+		if (anyAvailable.length > 0) return pickMostConstrainingQuotaWindow(anyAvailable);
+		if (cursorModelsWindows.length > 0) return pickMostConstrainingQuotaWindow(cursorModelsWindows);
+		return pickMostConstrainingQuotaWindow(windows);
+	}
+
+	const nonAux = windows.filter(w => !w.isAuxiliary);
+	const mainPool = nonAux.length > 0 ? nonAux : windows;
+	const normalizedActiveModel =
+		activeProvider === provider && typeof activeModelId === "string" ? activeModelId.trim().toLowerCase() : undefined;
+	const generalOrActiveModel = mainPool.filter(
+		w => !w.scopeModelId || w.scopeModelId === "general" || w.scopeModelId === normalizedActiveModel,
+	);
+	const scopedPool = generalOrActiveModel.length > 0 ? generalOrActiveModel : mainPool;
+	const primaryPool = scopedPool.filter(w => w.isPrimaryWindow);
+	return pickMostConstrainingQuotaWindow(primaryPool.length > 0 ? primaryPool : scopedPool);
+}
+
+function formatQuotaCapsuleResetText(resetMs: number | undefined): string | undefined {
+	if (resetMs === undefined || !Number.isFinite(resetMs) || resetMs <= 0 || resetMs > 7 * 86_400_000) {
+		return undefined;
+	}
+	if (resetMs < 3_600_000) {
+		return `${Math.max(1, Math.floor(resetMs / 60_000))}m`;
+	}
+	if (resetMs < 86_400_000) {
+		return `${Math.floor(resetMs / 3_600_000)}h`;
+	}
+	return `${Math.floor(resetMs / 86_400_000)}d`;
+}
+
+function deriveQuotaProviderShortLabel(provider: string): string {
+	const mapped = QUOTA_PROVIDER_SHORT_LABELS[provider];
+	if (mapped) return mapped;
+	const cleaned = provider.replace(/[^a-zA-Z0-9]+/g, "").toUpperCase();
+	return cleaned.slice(0, 4) || provider.slice(0, 4).toUpperCase();
+}
+
+function quotaPoolSortBucket(capsule: QuotaPoolCapsule): number {
+	if (capsule.active) return 0;
+	if (capsule.remainingPct <= 0) return 3;
+	if (capsule.severity === "warning" || capsule.severity === "error") return 1;
+	return 2;
+}
+
+function sameQuotaPoolCapsules(left: readonly QuotaPoolCapsule[], right: readonly QuotaPoolCapsule[]): boolean {
+	if (left === right) return true;
+	if (left.length !== right.length) return false;
+	for (let i = 0; i < left.length; i++) {
+		const a = left[i];
+		const b = right[i];
+		if (
+			a.provider !== b.provider ||
+			a.shortLabel !== b.shortLabel ||
+			a.remainingPct !== b.remainingPct ||
+			a.resetText !== b.resetText ||
+			a.bankedResets !== b.bankedResets ||
+			Boolean(a.active) !== Boolean(b.active) ||
+			a.severity !== b.severity
+		) {
+			return false;
+		}
+	}
+	return true;
+}
+
+export interface SummarizeQuotaPoolOptions {
+	activeProvider?: string;
+	activeModelId?: string;
+	nowMs?: number;
+	maxPools?: number;
+}
+
+/**
+ * Summarize raw multi-provider {@link UsageReport}s into compact status-bar
+ * quota capsules, aggregating multi-account providers to their best available
+ * account and summing banked reset credits.
+ */
+export function summarizeQuotaPoolCapsules(
+	reports: readonly unknown[],
+	options?: SummarizeQuotaPoolOptions,
+): QuotaPoolCapsule[] {
+	if (!Array.isArray(reports) || reports.length === 0) return [];
+	const activeProvider = options?.activeProvider;
+	const activeModelId = options?.activeModelId;
+	const nowMs = options?.nowMs ?? Date.now();
+	const maxPools = options?.maxPools !== undefined ? Math.max(0, Math.trunc(options.maxPools)) : 5;
+	if (maxPools === 0) return [];
+
+	const groupedReports = new Map<string, Record<string, unknown>[]>();
+	for (const rawReport of reports) {
+		if (!isRecord(rawReport)) continue;
+		const provider = typeof rawReport.provider === "string" ? rawReport.provider.trim() : "";
+		if (!provider || !Array.isArray(rawReport.limits)) continue;
+		let list = groupedReports.get(provider);
+		if (!list) {
+			list = [];
+			groupedReports.set(provider, list);
+		}
+		list.push(rawReport);
+	}
+
+	interface RankedQuotaPool {
+		capsule: QuotaPoolCapsule;
+		resetMs?: number;
+	}
+
+	const entries: RankedQuotaPool[] = [];
+	for (const [provider, providerReports] of groupedReports) {
+		let totalBankedResets = 0;
+		const seenCreditAccountIds: Record<string, true> = {};
+		const accountWindows: ParsedQuotaWindow[] = [];
+
+		for (const report of providerReports) {
+			if (
+				isRecord(report.resetCredits) &&
+				typeof report.resetCredits.availableCount === "number" &&
+				Number.isFinite(report.resetCredits.availableCount)
+			) {
+				const metadata = isRecord(report.metadata) ? report.metadata : null;
+				const accountId =
+					metadata && typeof metadata.accountId === "string" && metadata.accountId.trim()
+						? metadata.accountId.trim()
+						: undefined;
+				if (!accountId || !seenCreditAccountIds[accountId]) {
+					if (accountId) seenCreditAccountIds[accountId] = true;
+					totalBankedResets += Math.max(0, Math.trunc(report.resetCredits.availableCount));
+				}
+			}
+
+			const rawLimits = Array.isArray(report.limits) ? report.limits : [];
+			const parsedWindows: ParsedQuotaWindow[] = [];
+			for (const rawLimit of rawLimits) {
+				const parsed = parseQuotaWindow(rawLimit);
+				if (parsed) parsedWindows.push(parsed);
+			}
+			const chosen = pickAccountQuotaWindow(provider, parsedWindows, activeProvider, activeModelId);
+			if (chosen) accountWindows.push(chosen);
+		}
+
+		if (accountWindows.length === 0) continue;
+
+		let bestWindow = accountWindows[0];
+		for (let i = 1; i < accountWindows.length; i++) {
+			const candidate = accountWindows[i];
+			if (candidate.remainingPct !== bestWindow.remainingPct) {
+				if (candidate.remainingPct > bestWindow.remainingPct) bestWindow = candidate;
+				continue;
+			}
+			const bestResetMs = bestWindow.resetsAt !== undefined ? bestWindow.resetsAt - nowMs : undefined;
+			const candidateResetMs = candidate.resetsAt !== undefined ? candidate.resetsAt - nowMs : undefined;
+			if (candidate.remainingPct <= 0) {
+				const bestPos = bestResetMs !== undefined && bestResetMs > 0 ? bestResetMs : Number.POSITIVE_INFINITY;
+				const candPos =
+					candidateResetMs !== undefined && candidateResetMs > 0 ? candidateResetMs : Number.POSITIVE_INFINITY;
+				if (candPos < bestPos) bestWindow = candidate;
+			} else if (candidate.durationMs < bestWindow.durationMs) {
+				bestWindow = candidate;
+			}
+		}
+
+		const remainingPct = bestWindow.remainingPct;
+		const resetMs = bestWindow.resetsAt !== undefined ? bestWindow.resetsAt - nowMs : undefined;
+		const resetText = formatQuotaCapsuleResetText(resetMs);
+		const expiringSoon =
+			remainingPct < 95 &&
+			resetMs !== undefined &&
+			Number.isFinite(resetMs) &&
+			resetMs > 0 &&
+			resetMs <= 4 * 3_600_000;
+		const severity: QuotaPoolCapsule["severity"] =
+			remainingPct <= 15 ? "error" : remainingPct <= 40 || expiringSoon ? "warning" : "ok";
+
+		entries.push({
+			capsule: {
+				provider,
+				shortLabel: deriveQuotaProviderShortLabel(provider),
+				remainingPct,
+				...(resetText !== undefined ? { resetText } : {}),
+				...(totalBankedResets > 0 ? { bankedResets: totalBankedResets } : {}),
+				...(provider === activeProvider ? { active: true } : {}),
+				severity,
+			},
+			resetMs,
+		});
+	}
+
+	const healthyCount = entries.filter(
+		entry => entry.capsule.remainingPct > 0 && entry.capsule.severity !== "error",
+	).length;
+	const filtered =
+		healthyCount >= 4
+			? entries.filter(entry => entry.capsule.active === true || entry.capsule.remainingPct > 0)
+			: entries;
+
+	filtered.sort((a, b) => {
+		const bucketDiff = quotaPoolSortBucket(a.capsule) - quotaPoolSortBucket(b.capsule);
+		if (bucketDiff !== 0) return bucketDiff;
+		const aReset =
+			a.resetMs !== undefined && Number.isFinite(a.resetMs) && a.resetMs > 0
+				? a.resetMs
+				: Number.POSITIVE_INFINITY;
+		const bReset =
+			b.resetMs !== undefined && Number.isFinite(b.resetMs) && b.resetMs > 0
+				? b.resetMs
+				: Number.POSITIVE_INFINITY;
+		if (aReset !== bReset) return aReset - bReset;
+		if (a.capsule.remainingPct !== b.capsule.remainingPct) {
+			return a.capsule.remainingPct - b.capsule.remainingPct;
+		}
+		return a.capsule.provider.localeCompare(b.capsule.provider);
+	});
+
+	return filtered.slice(0, maxPools).map(entry => entry.capsule);
 }
 
 /** Last composer facts and the inputs they were built from. */
@@ -810,6 +1228,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		};
 	} | null = null;
 	#cachedUsageContextKey: string | null = null;
+	#cachedQuotaPools: readonly QuotaPoolCapsule[] = [];
+	#cachedQuotaReports: readonly unknown[] | null = null;
+	#cachedQuotaPoolsModelKey: string | null = null;
 	#usageFetchedAt = 0;
 	#usageInFlight = false;
 	#usageStartTimer: Timer | null = null;
@@ -1228,6 +1649,56 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		if (this.#recording === recording) return;
 		this.#recording = recording;
 		this.#invalidateStatusLineRenderCache();
+	}
+
+	/** Seed or refresh multi-provider quota capsules directly from cached or freshly fetched {@link UsageReport}s. */
+	setQuotaPoolsFromReports(reports: readonly unknown[]): void {
+		const activeProvider = this.session.state.model?.provider ?? this.session.model?.provider;
+		const activeModelId = this.session.state.model?.id ?? this.session.model?.id;
+		if (this.#updateQuotaPoolsFromReports(reports, activeProvider, activeModelId, Date.now())) {
+			this.#invalidateStatusLineRenderCache();
+			this.#onBranchChange?.();
+		}
+	}
+
+	#updateQuotaPoolsFromReports(
+		reports: readonly unknown[],
+		activeProvider: string | undefined,
+		activeModelId: string | undefined,
+		nowMs: number,
+	): boolean {
+		this.#cachedQuotaReports = reports;
+		this.#cachedQuotaPoolsModelKey = `${activeProvider ?? ""}\0${activeModelId ?? ""}`;
+		const nextPools = summarizeQuotaPoolCapsules(reports, {
+			activeProvider,
+			activeModelId,
+			nowMs,
+		});
+		if (sameQuotaPoolCapsules(this.#cachedQuotaPools, nextPools)) {
+			return false;
+		}
+		this.#cachedQuotaPools = nextPools;
+		return true;
+	}
+
+	#syncQuotaPoolsActiveModel(nowMs: number): void {
+		const activeProvider = this.session.state.model?.provider ?? this.session.model?.provider;
+		const activeModelId = this.session.state.model?.id ?? this.session.model?.id;
+		const modelKey = `${activeProvider ?? ""}\0${activeModelId ?? ""}`;
+		if (this.#cachedQuotaPoolsModelKey === modelKey) return;
+		this.#cachedQuotaPoolsModelKey = modelKey;
+		if (this.#cachedQuotaReports !== null) {
+			this.#cachedQuotaPools = summarizeQuotaPoolCapsules(this.#cachedQuotaReports, {
+				activeProvider,
+				activeModelId,
+				nowMs,
+			});
+		} else if (this.#cachedQuotaPools.length > 0) {
+			this.#cachedQuotaPools = this.#cachedQuotaPools.map(pool => ({
+				...pool,
+				active: pool.provider === activeProvider ? true : undefined,
+			}));
+		}
 	}
 
 	/** Set the callback that presents detected Codex reset celebrations, or clear it with `undefined`. */
@@ -2098,12 +2569,16 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		});
 		const resetSnapshot =
 			activeProvider === "openai-codex" ? this.#normalizeCodexResetSnapshot(reports, activeIdentity) : null;
+		const now = Date.now();
 		const usageChanged = this.#cachedUsage !== normalized;
+		const quotaPoolsChanged = Array.isArray(reports)
+			? this.#updateQuotaPoolsFromReports(reports, activeProvider, activeModelId, now)
+			: false;
 		this.#cachedUsage = normalized;
-		this.#usageFetchedAt = Date.now();
+		this.#usageFetchedAt = now;
 		// Usage fetch is async; without a repaint the top border stays blank until
 		// some unrelated event (git resolve, keystroke, …) rebuilds it.
-		if (usageChanged) {
+		if (usageChanged || quotaPoolsChanged) {
 			this.#invalidateStatusLineRenderCache();
 			this.#onBranchChange?.();
 		}
@@ -2532,6 +3007,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 
 		// Trigger background fetch (5-min TTL); render uses cached value
 		this.refreshUsageInBackground();
+		this.#syncQuotaPoolsActiveModel(nowMs);
 
 		// Get usage statistics
 		const aggregateUsageStats = this.session.sessionManager?.getUsageStatistics() ?? {
@@ -2636,6 +3112,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			},
 			worktree: activeRepoCache.worktree,
 			usage: this.#cachedUsage,
+			quotaPools: this.#cachedQuotaPools,
 		};
 	}
 

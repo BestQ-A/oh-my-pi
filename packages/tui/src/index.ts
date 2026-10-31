@@ -9,6 +9,11 @@ export * from "./components/cancellable-loader";
 export * from "./components/composer";
 export * from "./components/disclosure";
 export * from "./components/editor";
+export {
+	type NumberedPredictionItem,
+	nextGhostCompletionChunk,
+	parseNumberedPredictionItems,
+} from "./components/editor";
 export * from "./components/form";
 export * from "./components/image";
 export * from "./components/input";

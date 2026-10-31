@@ -24,6 +24,7 @@ export const STATUS_LINE_SEGMENT_IDS = [
 	"cache_hit",
 	"session_name",
 	"usage",
+	"quota_pools",
 	"collab",
 	"stream",
 	"vim",

@@ -29,6 +29,15 @@ import type { SharedTargetScope } from "./orphan-registry";
 const READY_LOG_PATTERN = String.raw`DevTools listening on ws://\S+`;
 const READY_TIMEOUT_MS = 30_000;
 const PROBE_TIMEOUT_MS = 1_500;
+/**
+ * Windows' chrome.exe launcher hands the browser off to a child and exits 0
+ * without the readiness line ever reaching the broker, so a start can settle
+ * with no endpoint while Chrome is coming up. The child publishes its listener
+ * in `DevToolsActivePort` under the profile only once it binds it, so a start
+ * that ended this way waits briefly for that file before the round is lost.
+ */
+const PUBLISHED_ENDPOINT_RETRY_MS = 100;
+const PUBLISHED_ENDPOINT_WAIT_MS = 1_500;
 /** describe→start rounds before giving up; bounds cross-process start races and wedged-Chrome replacement. */
 const ENSURE_ATTEMPTS = 3;
 /**
@@ -96,6 +105,43 @@ async function probeEndpoint(wsEndpoint: string): Promise<boolean> {
 	}
 	const status = await probeCdpStatus(`http://${host}/json/version`, { timeoutMs: PROBE_TIMEOUT_MS });
 	return status !== null && status >= 200 && status < 300;
+}
+
+/**
+ * Endpoint Chrome publishes in `DevToolsActivePort` under its profile when the
+ * CDP listener is up: the port on the first line, the browser's ws path on the
+ * second. This is what survives a Windows launcher hand-off, where the broker
+ * saw only the launcher's exit and recorded the daemon without an endpoint.
+ * Only an endpoint that answers `/json/version` is returned: a file left by a
+ * stopped Chrome — or one whose port is a dead leftover — must never be
+ * adopted, so the caller keeps its normal cleanup and start path.
+ */
+async function publishedEndpoint(userDataDir: string): Promise<string | undefined> {
+	let contents: string;
+	try {
+		contents = await fs.readFile(path.join(userDataDir, "DevToolsActivePort"), "utf8");
+	} catch {
+		return undefined;
+	}
+	const [port, wsPath] = contents.split("\n").map(line => line.trim());
+	if (!port || !wsPath || !/^\d+$/.test(port)) return undefined;
+	const wsEndpoint = `ws://127.0.0.1:${port}${wsPath}`;
+	return (await probeEndpoint(wsEndpoint)) ? wsEndpoint : undefined;
+}
+
+/** Poll {@link publishedEndpoint} until the handed-off child publishes, or `waitMs` runs out. */
+async function awaitPublishedEndpoint(
+	userDataDir: string,
+	waitMs: number,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
+	const deadline = Date.now() + waitMs;
+	for (;;) {
+		const published = await publishedEndpoint(userDataDir);
+		if (published || Date.now() >= deadline) return published;
+		await Bun.sleep(PUBLISHED_ENDPOINT_RETRY_MS);
+		throwIfAborted(signal);
+	}
 }
 
 /**
@@ -214,6 +260,13 @@ async function adoptOrStart(
 	claimed: boolean,
 	signal?: AbortSignal,
 ): Promise<SharedBrowserEndpoint | undefined> {
+	// The Windows chrome.exe launcher exits 0 once Chrome takes the process over,
+	// so the broker can hold no endpoint — or an exited record — while the
+	// browser is live on this profile and has published one. Adopt it before any
+	// profile write: preparing a profile under a running Chrome races its
+	// Preferences and asks a browser that stayed up to restore a stale session.
+	const published = await publishedEndpoint(userDataDir);
+	if (published) return { wsEndpoint: published, daemonName: name, projectDir: client.projectDir };
 	const described = await describeDaemon(client, name, "Shared browser", signal);
 	// No settled answer: Chrome may be running on the profile, so it must not be
 	// prepared, and a start without preparing it restores the stale session.
@@ -261,6 +314,13 @@ async function adoptOrStart(
 		if (wsEndpoint && (await probeEndpoint(wsEndpoint))) {
 			return { wsEndpoint, daemonName: name, projectDir: client.projectDir };
 		}
+		// The launch may have handed off to a Chrome child that outlived the
+		// launcher without the readiness line reaching the broker. Only an ended
+		// record earns the wait: a start that timed out has already had its full
+		// readiness window, so one look is all that can change.
+		const ended = started.daemon.state === "exited" || started.daemon.state === "failed";
+		const handedOff = await awaitPublishedEndpoint(userDataDir, ended ? PUBLISHED_ENDPOINT_WAIT_MS : 0, signal);
+		if (handedOff) return { wsEndpoint: handedOff, daemonName: name, projectDir: client.projectDir };
 		await stopQuietly(client, name, "Shared browser", signal);
 	} catch (error) {
 		throwIfAborted(signal);
