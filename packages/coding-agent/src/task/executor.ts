@@ -149,6 +149,7 @@ import { seanceIsolationOptions } from "./seance-policy";
 import type { PreparedSeanceSession } from "./seance";
 import {
 	type AgentProgress,
+	deriveSubagentHealth,
 	type SingleResult,
 	type StructuredSubagentOutput,
 	type StructuredSubagentSchemaMode,
@@ -168,6 +169,7 @@ import {
 	cfgTaskAgentSoftRequestBudget,
 	cfgTaskAgentIdleTtlMs,
 	cfgTaskMaxRuntimeMs,
+	cfgTaskAgentMaxRuntimeMs,
 	cfgTaskMaxRecursionDepth,
 	cfgTaskAgentAdvisor,
 	cfgTaskAgentAccountPools,
@@ -243,6 +245,25 @@ export function softRequestBudgetFor(
 		),
 		softRequestBudgetNotice: cfgTaskSoftRequestBudgetNotice.get(settings),
 	};
+}
+
+/**
+ * Effective wall-clock cap for an agent run (ms; 0 = no cap). An explicit
+ * run override wins, then the agent's exact-name `task.agentMaxRuntimeMs`
+ * entry (0 disables its cap even when `task.maxRuntimeMs` is set), then the
+ * global `task.maxRuntimeMs`.
+ */
+export function resolveMaxRuntimeMs(
+	agentName: string,
+	configuredMaxRuntimeMs: number,
+	agentMaxRuntimes: Readonly<Record<string, number | null>> = {},
+	explicitRunOverride?: number,
+): number {
+	const clamp = (value: unknown) => Math.max(0, Math.trunc(Number(value) || 0));
+	if (explicitRunOverride !== undefined) return clamp(explicitRunOverride);
+	const agentEntry = agentMaxRuntimes[agentName];
+	if (typeof agentEntry === "number") return clamp(agentEntry);
+	return clamp(configuredMaxRuntimeMs);
 }
 
 /** Extra requests allowed after a budget stop for the forced yield to land before the run is hard-aborted. */
@@ -1467,6 +1488,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		modelOverride: args.modelOverride,
 		modelRole: args.modelRole,
 		resolvedModelRoute: args.modelRoute,
+		lastActivityMs: startTime,
 	};
 
 	const outputChunks: string[] = [];
@@ -1714,6 +1736,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	const emitProgressNow = () => {
 		refreshRecentOutput();
 		progress.durationMs = Date.now() - startTime;
+		progress.derivedHealth = deriveSubagentHealth(progress, Date.now());
 		onProgress?.({ ...progress });
 		const activityGist =
 			progress.lastIntent ?? (progress.currentTool ? `running ${progress.currentTool}` : undefined);
@@ -1922,6 +1945,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	const processEvent = (event: AgentEvent) => {
 		if (resolved) return;
 		const now = Date.now();
+		progress.lastActivityMs = now;
 		let flushProgress = false;
 
 		switch (event.type) {
@@ -2330,6 +2354,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			emitSubagentEvent(event);
 			publishAdvisorState(session);
 			publishServingModel();
+			if (event.type === "auto_retry_start" || event.type === "auto_retry_end") progress.lastActivityMs = Date.now();
 			if (event.type === "auto_retry_start") {
 				progress.retryState = {
 					attempt: event.attempt,
@@ -4614,7 +4639,12 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		options.parentServiceTier,
 	);
 	const maxRecursionDepth = cfgTaskMaxRecursionDepth.get(settings);
-	const maxRuntimeMs = Math.max(0, Math.trunc(Number(options.maxRuntimeMs ?? cfgTaskMaxRuntimeMs.get(settings)) || 0));
+	const maxRuntimeMs = resolveMaxRuntimeMs(
+		agent.name,
+		cfgTaskMaxRuntimeMs.get(settings),
+		cfgTaskAgentMaxRuntimeMs.get(settings),
+		options.maxRuntimeMs,
+	);
 	// TTL before an adopted idle subagent is parked by the lifecycle manager.
 	// <= 0 disables parking (the session stays live until process teardown).
 	const agentIdleTtlMs = Math.trunc(Number(cfgTaskAgentIdleTtlMs.get(settings)) || 0);

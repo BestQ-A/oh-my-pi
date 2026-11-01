@@ -2380,6 +2380,35 @@ export interface YieldItem {
 	schemaOverridden?: boolean;
 }
 
+/** Derived health of a running subagent; only non-`working` states surface in status rows. */
+export type SubagentHealth = "working" | "retrying" | "rate_limited" | "stalled";
+
+/** No LLM delta and no running tool for this long marks a running subagent `stalled`. */
+export const SUBAGENT_STALL_THRESHOLD_MS = 180_000;
+
+/**
+ * Health of a running subagent from recorded facts, first match wins:
+ * retry gave up → `rate_limited`; retry sleeping → `retrying`; no activity and
+ * no tool in flight past the threshold → `stalled`; else `working`.
+ * Undefined for a run that is not running.
+ */
+export function deriveSubagentHealth(
+	progress: Pick<AgentProgress, "status" | "retryState" | "retryFailure" | "lastActivityMs" | "currentTool">,
+	nowMs: number,
+	stallThresholdMs = SUBAGENT_STALL_THRESHOLD_MS,
+): SubagentHealth | undefined {
+	if (progress.status !== "running") return undefined;
+	if (progress.retryFailure) return "rate_limited";
+	if (progress.retryState) return "retrying";
+	if (
+		progress.lastActivityMs !== undefined &&
+		!progress.currentTool &&
+		nowMs - progress.lastActivityMs >= stallThresholdMs
+	)
+		return "stalled";
+	return "working";
+}
+
 /** Progress tracking for a single agent */
 export interface AgentProgress {
 	index: number;
@@ -2479,6 +2508,13 @@ export interface AgentProgress {
 		attempt: number;
 		errorMessage: string;
 	};
+	/** Epoch ms of the last observed subagent activity (message, tool, or retry event); {@link deriveSubagentHealth}'s stall anchor. */
+	lastActivityMs?: number;
+	/**
+	 * Deterministically derived run health ({@link deriveSubagentHealth}):
+	 * `working` runs stay quiet; `retrying`/`rate_limited`/`stalled` surface.
+	 */
+	derivedHealth?: SubagentHealth;
 	/**
 	 * Snapshot of the most recent `task` tool call's in-flight `TaskToolDetails`,
 	 * captured from `tool_execution_update`. Lets the parent UI surface live

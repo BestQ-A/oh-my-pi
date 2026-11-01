@@ -16,7 +16,12 @@ import {
 
 import { renderStructuredJson, structuredStatusLabel, taskAgentHandles } from "../session/async-job-delivery";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
-import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
+import {
+	type AgentProgress,
+	deriveSubagentHealth,
+	type StructuredSubagentOutput,
+	type SubagentHealth,
+} from "@oh-my-pi/pi-tui/tools/task";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 
 import type { ToolSession } from "../tools";
@@ -184,6 +189,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 		let cost: number | undefined;
 		let contextTokens: number | undefined;
 		let contextWindow: number | undefined;
+		let derivedHealth: SubagentHealth | undefined;
 		if (latest.type === "task") {
 			// A collided job id is suffixed (`Foo-2`) while its agent id stays `Foo`.
 			const progressRecord = agentProgress(latest.latestDetails, current?.agentId ?? latest.id);
@@ -216,6 +222,13 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 				cost = finiteNumber(progressRecord?.cost);
 				contextTokens = finiteNumber(progressRecord?.contextTokens);
 				contextWindow = finiteNumber(progressRecord?.contextWindow);
+				if (latest.status === "running" && progressRecord) {
+					// Re-derive at read time: a stalled run emits no events, so its stored health would stay `working`.
+					derivedHealth = deriveSubagentHealth(
+						{ ...(progressRecord as Partial<AgentProgress>), status: "running" } as AgentProgress,
+						now,
+					);
+				}
 			}
 		}
 		const running = latest.status === "running";
@@ -239,6 +252,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			...(cost !== undefined && running ? { cost } : {}),
 			...(contextTokens !== undefined && running ? { contextTokens } : {}),
 			...(contextWindow !== undefined && running ? { contextWindow } : {}),
+			...(derivedHealth && derivedHealth !== "working" && running ? { derivedHealth } : {}),
 			...(widget ? { widget } : {}),
 			...(!resultConsumed && latest.resultText ? { resultText: latest.resultText } : {}),
 			...(!resultConsumed && latest.errorText ? { errorText: latest.errorText } : {}),
@@ -265,6 +279,7 @@ function finiteNumber(value: unknown): number | undefined {
 export function runningTaskProgressSuffix(job: JobSnapshot, options: { duration: boolean }): string {
 	if (job.type !== "task" || job.status !== "running") return "";
 	const parts: string[] = [];
+	if (job.derivedHealth && job.derivedHealth !== "working") parts.push(`health: ${job.derivedHealth}`);
 	if (job.requests !== undefined && job.requests > 0) parts.push(`${job.requests} req`);
 	if (job.cost !== undefined && job.cost > 0) parts.push(job.cost < 0.005 ? "<$0.01" : `$${job.cost.toFixed(2)}`);
 	if (job.contextTokens !== undefined && job.contextTokens > 0) {

@@ -19,6 +19,7 @@ const EMPTY_AGENT_SERVICE_TIER_OVERRIDES: Record<string, ServiceTierInheritSetti
 const EMPTY_AGENT_COMPACTION_THRESHOLD_OVERRIDES: Record<string, AgentCompactionThresholdOverride> = {};
 const EMPTY_AGENT_ACCOUNT_POOLS: Record<string, OAuthAccountPools> = {};
 const EMPTY_AGENT_SOFT_REQUEST_BUDGET: Record<string, number | null> = {};
+const EMPTY_AGENT_MAX_RUNTIME_MS: Record<string, number | null> = {};
 
 const DEFAULT_AGENT_MODEL_OVERRIDES: Record<string, string | string[]> = {};
 
@@ -528,7 +529,7 @@ export const cfgTaskMaxRuntimeMs = register({
 		group: "Subagents",
 		label: "Max Subagent Runtime",
 		description:
-			"Hard wall-clock limit per subagent (ms). 0 disables it. Defense-in-depth against provider-side stream hangs that escape the inference-layer watchdog; triggers a normal subagent abort with a 'timed out' reason.",
+			"Hard wall-clock limit per subagent (ms). 0 disables it. Defense-in-depth against provider-side stream hangs that escape the inference-layer watchdog; triggers a normal subagent abort with a 'timed out' reason. A task.agentMaxRuntimeMs entry replaces this cap for the agent it names.",
 		options: [
 			{ value: "0", label: "Unlimited", description: "Default" },
 			{ value: "300000", label: "5 minutes" },
@@ -537,6 +538,38 @@ export const cfgTaskMaxRuntimeMs = register({
 			{ value: "3600000", label: "1 hour" },
 		],
 	},
+});
+
+/**
+ * Validates `task.agentMaxRuntimeMs`: exact agent name → wall-clock cap in
+ * milliseconds, a non-negative safe integer (0 disables that agent's cap). A
+ * `null` entry clears one inherited from a lower-priority settings layer.
+ */
+function validateAgentMaxRuntimeMs(value: unknown): void {
+	if (value === undefined || value === null) return;
+	if (!isRecord(value)) {
+		const received = Array.isArray(value) ? "an array" : `a ${typeof value}`;
+		throw new Error(
+			`Invalid task.agentMaxRuntimeMs: expected a map of agent name to a wall-clock cap in milliseconds, got ${received}.`,
+		);
+	}
+	for (const [agentName, maxRuntimeMs] of Object.entries(value)) {
+		if (
+			maxRuntimeMs === null ||
+			(typeof maxRuntimeMs === "number" && Number.isSafeInteger(maxRuntimeMs) && maxRuntimeMs >= 0)
+		)
+			continue;
+		throw new Error(
+			`Invalid task.agentMaxRuntimeMs.${agentName}: expected a non-negative integer millisecond count (0 disables the cap), got ${Bun.inspect(maxRuntimeMs)}.`,
+		);
+	}
+}
+
+export const cfgTaskAgentMaxRuntimeMs = register({
+	id: "task.agentMaxRuntimeMs",
+	type: "record",
+	default: EMPTY_AGENT_MAX_RUNTIME_MS,
+	validate: validateAgentMaxRuntimeMs,
 });
 
 export const cfgTaskCompletionProbe = register({
