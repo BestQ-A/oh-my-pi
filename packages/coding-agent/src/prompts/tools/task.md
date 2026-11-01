@@ -73,7 +73,7 @@ Run one agent synchronously.
   - Allowlist: {{#list perCallModelAdvertisement.allowlist join=", "}}`{{this}}`{{/list}} (must also be approved).
 {{/if}}
   - An agent's `task.agentModelOverrides` entry or user-chosen effort conflicts with `model`.
-  - Omit unless needed.
+  - Omit unless needed; session/saved per-agent defaults live at `cfg://task/agentModelOverrides`.
   - Requested model unavailable → stop and report; NEVER substitute another.
   - Every request requires an approved model; retry fallback, context promotion and prewalk are off.
 {{/if}}

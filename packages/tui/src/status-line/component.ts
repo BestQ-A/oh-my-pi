@@ -519,13 +519,9 @@ export function summarizeQuotaPoolCapsules(
 		const bucketDiff = quotaPoolSortBucket(a.capsule) - quotaPoolSortBucket(b.capsule);
 		if (bucketDiff !== 0) return bucketDiff;
 		const aReset =
-			a.resetMs !== undefined && Number.isFinite(a.resetMs) && a.resetMs > 0
-				? a.resetMs
-				: Number.POSITIVE_INFINITY;
+			a.resetMs !== undefined && Number.isFinite(a.resetMs) && a.resetMs > 0 ? a.resetMs : Number.POSITIVE_INFINITY;
 		const bReset =
-			b.resetMs !== undefined && Number.isFinite(b.resetMs) && b.resetMs > 0
-				? b.resetMs
-				: Number.POSITIVE_INFINITY;
+			b.resetMs !== undefined && Number.isFinite(b.resetMs) && b.resetMs > 0 ? b.resetMs : Number.POSITIVE_INFINITY;
 		if (aReset !== bReset) return aReset - bReset;
 		if (a.capsule.remainingPct !== b.capsule.remainingPct) {
 			return a.capsule.remainingPct - b.capsule.remainingPct;

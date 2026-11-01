@@ -160,6 +160,8 @@ import {
 } from "../settings";
 import { cfgTaskAgentModelOverrides } from "../../task/settings";
 
+import { AgentRegistry } from "../../registry/agent-registry";
+import { switchSubagentModel } from "../../task/subagent-model-switch";
 /** First-use boundary for provider auth catalog and dialog components. */
 async function loadProviderAuthUi() {
 	const [{ PASTE_CODE_LOGIN_PROVIDERS }, oauth, loginDialog, logoutSelector, oauthSelector] = await Promise.all([
@@ -840,13 +842,27 @@ export class SelectorController {
 		const focusedAgentId = this.ctx.focusedAgentId;
 		const apply = async () => {
 			const level = thinkingLevel ?? target.resolveTemporaryModelThinkingLevel(model);
+			if (focusedAgentId) {
+				const outcome = await target.switchModelAndContinue(model, { thinkingLevel: level });
+				AgentRegistry.global().setHistory(focusedAgentId, {
+					resolvedModel: outcome.model,
+					resolvedModelIsFallback: false,
+				});
+				this.ctx.statusLine.invalidate();
+				this.ctx.updateEditorBorderColor();
+				const detail = outcome.interruptedLlm
+					? " (interrupted & resumed)"
+					: outcome.deferredAfterActiveTools
+						? " (continues after active tool)"
+						: outcome.resumed
+							? " (resumed)"
+							: "";
+				this.ctx.showStatus(`Agent ${focusedAgentId} model: ${outcome.model}${detail}`);
+				return;
+			}
 			await target.setModelTemporary(model, level);
 			this.ctx.statusLine.invalidate();
 			this.ctx.updateEditorBorderColor();
-			if (focusedAgentId) {
-				this.ctx.showStatus(`Agent ${focusedAgentId} model: ${selector}`);
-				return;
-			}
 			const roleSelectorHint = appKey(this.ctx.keybindings, "app.model.select") || formatKeyHint("alt+m");
 			this.ctx.showStatus(`Session-only model: ${selector}. Use ${roleSelectorHint} or /model for roles.`);
 		};
@@ -907,7 +923,9 @@ export class SelectorController {
 			if (this.#openMenus.get(menuKind) !== menu) return;
 			menu.handle?.hide();
 			this.#releaseMenu(menuKind, menu);
-			this.focusActiveEditorArea();
+			if (!this.#focusOpenMenu("agent-hub")) {
+				this.focusActiveEditorArea();
+			}
 			this.ctx.ui.requestRender();
 		};
 		const isCurrent = () => this.#openMenus.get(menuKind) === menu;
@@ -941,7 +959,15 @@ export class SelectorController {
 				onPickRole: async entry => {
 					if (!isCurrent() || selectOnly) return;
 					try {
-						await this.ctx.viewSession.applyRoleModel(entry);
+						if (this.ctx.focusedAgentId) {
+							const outcome = await this.ctx.viewSession.switchModelAndContinue(entry.model);
+							AgentRegistry.global().setHistory(this.ctx.focusedAgentId, {
+								resolvedModel: outcome.model,
+								resolvedModelIsFallback: false,
+							});
+						} else {
+							await this.ctx.viewSession.applyRoleModel(entry);
+						}
 						this.ctx.statusLine.invalidate();
 						this.ctx.updateEditorBorderColor();
 						this.ctx.showModelCycleTrack(
@@ -988,6 +1014,29 @@ export class SelectorController {
 			return handle;
 		});
 		this.ctx.ui.requestRender();
+	}
+
+	/** Open a floating Model Picker targeted at subagent `agentId` to switch its model mid-flight and continue. */
+	showSubagentModelPicker(agentId: string, onSwitched?: (summary: string) => void): void {
+		const ref = AgentRegistry.global().get(agentId);
+		const currentSelector = ref?.session?.model
+			? `${ref.session.model.provider}/${ref.session.model.id}`
+			: ref?.history?.resolvedModel;
+		this.#showModelPicker({
+			selectOnly: {
+				currentSelector,
+				onSelect: async selector => {
+					const switched = await switchSubagentModel({
+						caller: this.ctx.session,
+						targetId: agentId,
+						modelSelector: selector,
+					});
+					this.ctx.statusLine.invalidate();
+					onSwitched?.(switched.summary);
+					this.ctx.showStatus(switched.summary);
+				},
+			},
+		});
 	}
 
 	/**
@@ -2750,6 +2799,9 @@ export class SelectorController {
 			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
 			expandThinkingBlocks: () => this.ctx.expandThinkingBlocks,
 			focusAgent: id => this.ctx.focusAgentSession(id),
+			switchAgentModel: this.ctx.collabGuest
+				? undefined
+				: (id, setNotice) => this.showSubagentModelPicker(id, setNotice),
 			sessionFile: this.ctx.sessionManager.getSessionFile() ?? null,
 		});
 

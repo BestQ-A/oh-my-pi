@@ -46,6 +46,7 @@ import {
 	writeCachedFinopsUsageReports,
 } from "../modes/quota-hud-bridge";
 import { cfgComposerMarginHud } from "../modes/settings";
+import { switchSubagentModel } from "../task/subagent-model-switch";
 
 const QUOTA_SUBCOMMANDS: Record<string, true> = {
 	show: true,
@@ -352,10 +353,15 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "jobs",
 		description: "Show async background jobs status",
 		acpDescription: "Show background jobs",
-		acpInputHint: "[full|kill <id>|kill all]",
+		acpInputHint: "[full|kill <id>|kill all|model <id> <model>]",
 		subcommands: [
 			{ name: "full", description: "Show full, untruncated command lines" },
 			{ name: "kill", description: "Cancel a running background job", usage: "<id>|all" },
+			{
+				name: "model",
+				description: "Switch a subagent's model mid-flight and continue",
+				usage: "<id> [model] [prompt...]",
+			},
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
@@ -369,7 +375,29 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				await handleJobsKillCommand(rest, runtime.session, runtime.output);
 				return commandConsumed();
 			}
-			if (rest || (verb && verb !== "full")) return usage("Usage: /jobs [full|kill <id>|kill all]", runtime);
+			if (verb === "model") {
+				const { verb: agentId, rest: modelAndPrompt } = parseSubcommand(rest);
+				const { verb: modelSelector, rest: followUpPrompt } = parseSubcommand(modelAndPrompt);
+				if (!agentId || !modelSelector) {
+					return usage("Usage: /jobs model <subagent-id> <model> [prompt...]", runtime);
+				}
+				try {
+					const switched = await switchSubagentModel({
+						caller: runtime.session,
+						targetId: agentId,
+						modelSelector,
+						prompt: followUpPrompt.trim() || undefined,
+					});
+					await runtime.output(
+						switched.warning ? `${switched.summary}\nNote: ${switched.warning}` : switched.summary,
+					);
+					return commandConsumed();
+				} catch (err) {
+					return usage(`Failed to switch subagent model: ${errorMessage(err)}`, runtime);
+				}
+			}
+			if (rest || (verb && verb !== "full"))
+				return usage("Usage: /jobs [full|kill <id>|kill all|model <id> <model>]", runtime);
 			const full = verb === "full";
 			if (full) runtime.session.requestJobCaptions();
 			const tree = runtime.session.getAsyncJobTree();
@@ -415,12 +443,107 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const { verb, rest } = parseSubcommand(command.args);
 			if (verb === "kill") {
 				await handleJobsKillCommand(rest, runtime.ctx.session, text => runtime.ctx.showStatus(text));
+			} else if (verb === "model") {
+				const { verb: agentId, rest: modelAndPrompt } = parseSubcommand(rest);
+				const { verb: modelSelector, rest: followUpPrompt } = parseSubcommand(modelAndPrompt);
+				if (!agentId) {
+					runtime.ctx.showStatus("Usage: /jobs model <subagent-id> [model] [prompt...]");
+				} else if (!modelSelector) {
+					runtime.ctx.showSubagentModelPicker(agentId);
+				} else {
+					try {
+						const switched = await switchSubagentModel({
+							caller: runtime.ctx.session,
+							targetId: agentId,
+							modelSelector,
+							prompt: followUpPrompt.trim() || undefined,
+						});
+						runtime.ctx.statusLine.invalidate();
+						runtime.ctx.showStatus(switched.summary);
+					} catch (err) {
+						runtime.ctx.showError(`Failed to switch subagent model: ${errorMessage(err)}`);
+					}
+				}
 			} else if (rest || (verb && verb !== "full")) {
-				runtime.ctx.showStatus("Usage: /jobs [full|kill <id>|kill all]");
+				runtime.ctx.showStatus("Usage: /jobs [full|kill <id>|kill all|model <id> [model]]");
 			} else {
 				await runtime.ctx.handleJobsCommand({ full: verb === "full" });
 			}
 			clearSubmittedText(runtime);
+		},
+	},
+	{
+		name: "subagent",
+		icon: "agents",
+		description: "Switch a running or parked subagent's model mid-flight and continue, or open Agent Hub",
+		acpDescription: "Switch subagent model mid-flight",
+		acpInputHint: "[model] <subagent-id> [model] [prompt...]",
+		subcommands: [
+			{
+				name: "model",
+				description: "Switch a subagent's model mid-flight and continue",
+				usage: "<subagent-id> [model] [prompt...]",
+			},
+			{
+				name: "hub",
+				description: "Open Agent Hub",
+			},
+		],
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const { verb, rest } = parseSubcommand(command.args);
+			const payload = verb === "model" || verb === "switch" ? rest : command.args;
+			const { verb: agentId, rest: modelAndPrompt } = parseSubcommand(payload);
+			const { verb: modelSelector, rest: followUpPrompt } = parseSubcommand(modelAndPrompt);
+			if (!agentId || !modelSelector) {
+				return usage("Usage: /subagent [model] <subagent-id> <model> [prompt...]", runtime);
+			}
+			try {
+				const switched = await switchSubagentModel({
+					caller: runtime.session,
+					targetId: agentId,
+					modelSelector,
+					prompt: followUpPrompt.trim() || undefined,
+				});
+				await runtime.output(
+					switched.warning ? `${switched.summary}\nNote: ${switched.warning}` : switched.summary,
+				);
+				return commandConsumed();
+			} catch (err) {
+				return usage(`Failed to switch subagent model: ${errorMessage(err)}`, runtime);
+			}
+		},
+		handleTui: async (command, runtime) => {
+			clearSubmittedText(runtime);
+			const trimmed = command.args.trim();
+			if (!trimmed || trimmed === "hub") {
+				runtime.ctx.showAgentHub();
+				return;
+			}
+			const { verb, rest } = parseSubcommand(trimmed);
+			const payload = verb === "model" || verb === "switch" ? rest : trimmed;
+			const { verb: agentId, rest: modelAndPrompt } = parseSubcommand(payload);
+			const { verb: modelSelector, rest: followUpPrompt } = parseSubcommand(modelAndPrompt);
+			if (!agentId) {
+				runtime.ctx.showStatus("Usage: /subagent [model] <subagent-id> [model] [prompt...]");
+				return;
+			}
+			if (!modelSelector) {
+				runtime.ctx.showSubagentModelPicker(agentId);
+				return;
+			}
+			try {
+				const switched = await switchSubagentModel({
+					caller: runtime.ctx.session,
+					targetId: agentId,
+					modelSelector,
+					prompt: followUpPrompt.trim() || undefined,
+				});
+				runtime.ctx.statusLine.invalidate();
+				runtime.ctx.showStatus(switched.summary);
+			} catch (err) {
+				runtime.ctx.showError(`Failed to switch subagent model: ${errorMessage(err)}`);
+			}
 		},
 	},
 	{

@@ -163,25 +163,7 @@ export const seanceTaskSchemaFields = {
 } satisfies Required<SeanceTaskSchemaFields>;
 export const seanceTaskGuidance = seanceTaskGuidanceTemplate;
 
-function validateSeanceFields(
-	item: TaskItem | TaskParams,
-	agent: string,
-	label: string,
-	seanceAdvertised: boolean,
-): string | undefined {
-	if (agent !== SEANCE_AGENT_NAME) {
-		if (item.sourceSession !== undefined)
-			return `\`sourceSession\` is only accepted for the \`${SEANCE_AGENT_NAME}\` agent.`;
-		// Elsewhere `model` is the per-call selector, decided by `task.perCallModel` at preflight.
-		return undefined;
-	}
-	// Hidden bundled seance (plan mode, policy) is rejected at spawn; a custom shadow is an ordinary agent.
-	if (!seanceAdvertised) return undefined;
-	if (typeof item.sourceSession !== "string" || item.sourceSession.trim().length === 0) {
-		return `${label} selects the \`${SEANCE_AGENT_NAME}\` agent and requires a non-empty \`sourceSession\`.`;
-	}
-	if ("tools" in item && item.tools?.length)
-		return `${label} cannot pass custom tools to the read-only \`${SEANCE_AGENT_NAME}\` agent.`;
+function validateModelField(item: TaskItem | TaskParams, label: string): string | undefined {
 	const model: unknown = item.model;
 	if (
 		model !== undefined &&
@@ -194,6 +176,29 @@ function validateSeanceFields(
 	) {
 		return `${label} has an invalid \`model\` selector. Provide a non-empty selector or selector array.`;
 	}
+	return undefined;
+}
+
+function validateSeanceFields(
+	item: TaskItem | TaskParams,
+	agent: string,
+	label: string,
+	seanceAdvertised: boolean,
+): string | undefined {
+	const modelError = validateModelField(item, label);
+	if (modelError) return modelError;
+	if (agent !== SEANCE_AGENT_NAME) {
+		if (item.sourceSession !== undefined)
+			return `\`sourceSession\` is only accepted for the \`${SEANCE_AGENT_NAME}\` agent.`;
+		return undefined;
+	}
+	// Hidden bundled seance (plan mode, policy) is rejected at spawn; a custom shadow is an ordinary agent.
+	if (!seanceAdvertised) return undefined;
+	if (typeof item.sourceSession !== "string" || item.sourceSession.trim().length === 0) {
+		return `${label} selects the \`${SEANCE_AGENT_NAME}\` agent and requires a non-empty \`sourceSession\`.`;
+	}
+	if ("tools" in item && item.tools?.length)
+		return `${label} cannot pass custom tools to the read-only \`${SEANCE_AGENT_NAME}\` agent.`;
 	return undefined;
 }
 

@@ -204,9 +204,7 @@ describe("Numbered empty-composer prediction menu (1. 内容1  2. 内容2  3. �
 			{ index: 2, text: "跑全量测试" },
 			{ index: 3, text: "查看git diff" },
 		]);
-		expect(
-			parseNumberedPredictionItems("1. 升级 IDA Pro 9.5 配置  2. 测试 2.0 接口  3. 查看 diff"),
-		).toEqual([
+		expect(parseNumberedPredictionItems("1. 升级 IDA Pro 9.5 配置  2. 测试 2.0 接口  3. 查看 diff")).toEqual([
 			{ index: 1, text: "升级 IDA Pro 9.5 配置" },
 			{ index: 2, text: "测试 2.0 接口" },
 			{ index: 3, text: "查看 diff" },

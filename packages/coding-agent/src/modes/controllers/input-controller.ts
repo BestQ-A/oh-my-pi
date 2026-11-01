@@ -194,6 +194,7 @@ const FOCUSED_VIEW_COMMANDS: Record<string, (args: string) => boolean> = {
 	model: () => true,
 	switch: () => true,
 	quota: () => true,
+	subagent: () => true,
 	usage: args => {
 		const { verb, rest } = parseSubcommand(args);
 		return !verb || (verb === "show" && !rest);

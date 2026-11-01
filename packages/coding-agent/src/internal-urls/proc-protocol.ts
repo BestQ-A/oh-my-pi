@@ -24,6 +24,7 @@ import {
 import type { ProcReadDetails } from "@oh-my-pi/pi-tui/tools/proc-render";
 import procPromptDoc from "../prompts/internal-urls/proc.md" with { type: "text" };
 import procReferenceDoc from "../prompts/internal-urls/proc-reference.md" with { type: "text" };
+import { inspectSubagentModel, switchSubagentModel } from "../task/subagent-model-switch";
 import type { ToolSession } from "../tools";
 import type {
 	InternalResource,
@@ -39,7 +40,7 @@ import type {
 import { cfgLaunchEnabled } from "../tools/settings";
 
 type ProcTarget =
-	| { id: string; action: "stdin" | "mode" | "kill" }
+	| { id: string; action: "stdin" | "mode" | "kill" | "model" }
 	/** `proc://<id>/streams` lists a bash job's pipe streams; `/streams/<n>` reads one. */
 	| { id: string; action: "streams"; stream?: number };
 
@@ -48,9 +49,13 @@ const STREAMS_PATH = /^\/streams(?:\/(\d+))?\/?$/;
 function target(url: InternalUrl): ProcTarget {
 	const path = url.rawPathname ?? url.pathname;
 	const streams = STREAMS_PATH.exec(path);
-	if (url.search || url.hash || (!streams && path !== "" && path !== "/" && path !== "/mode" && path !== "/kill"))
+	if (
+		url.search ||
+		url.hash ||
+		(!streams && path !== "" && path !== "/" && path !== "/mode" && path !== "/kill" && path !== "/model")
+	)
 		throw new Error(
-			`Invalid proc:// URL: ${url.rawHref ?? url.href}. Use proc://, proc://<id>, proc://<id>/streams[/<n>], proc://<id>/kill, or proc://<id>/mode.`,
+			`Invalid proc:// URL: ${url.rawHref ?? url.href}. Use proc://, proc://<id>, proc://<id>/streams[/<n>], proc://<id>/kill, proc://<id>/model, or proc://<id>/mode.`,
 		);
 	const id = url.rawHost;
 	if (id.includes("/") || id === "." || id === "..") throw new Error(`Invalid process id: ${id}`);
@@ -58,7 +63,10 @@ function target(url: InternalUrl): ProcTarget {
 		if (!id) throw new Error("proc://<id>/streams needs a job id, e.g. proc://bg_3/streams");
 		return { id, action: "streams", stream: streams[1] === undefined ? undefined : Number(streams[1]) };
 	}
-	return { id, action: path === "/mode" ? "mode" : path === "/kill" ? "kill" : "stdin" };
+	return {
+		id,
+		action: path === "/mode" ? "mode" : path === "/kill" ? "kill" : path === "/model" ? "model" : "stdin",
+	};
 }
 
 /** `proc://<id>/kill`: cancels a job, agent, or service; needs no content and touches no files. */
@@ -182,6 +190,13 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		const procTarget = target(url);
 		const { id } = procTarget;
 		if (procTarget.action === "streams") return streamsResource(url, session, id, procTarget.stream);
+		if (procTarget.action === "model") {
+			if (!id) throw new Error("proc://<id>/model needs a subagent id, e.g. proc://Worker/model");
+			const info = await inspectSubagentModel(session, id);
+			const thinking = info.thinkingLevel ? ` (thinking: ${info.thinkingLevel})` : "";
+			const streaming = info.isStreaming ? ", streaming" : "";
+			return textResource(url, `${info.id}: ${info.model ?? "unassigned"}${thinking} [${info.status}${streaming}]`);
+		}
 		if (procTarget.action !== "stdin") throw new Error(writeOnlyError(id || "<id>", procTarget.action));
 		const jobs = ownerJobs(session);
 		// Jobs and agents are in-process; a hung broker must not hide them.
@@ -273,8 +288,30 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		if (action === "streams") throw new Error(`proc://${id}/streams is read-only`);
 		if (!id)
 			throw new Error(
-				"Write requires proc://<service> for stdin, proc://<id>/kill, or proc://<service>/mode; stdin and modes are services-only.",
+				"Write requires proc://<service> for stdin, proc://<id>/kill, proc://<id>/model, or proc://<service>/mode; stdin and modes are services-only.",
 			);
+		if (action === "model") {
+			const trimmed = content.trim();
+			if (!trimmed) {
+				throw new Error(
+					`proc://${id}/model requires a model selector in content (e.g. "magpie/codex/gpt-6.1-sol", "@slow", or "claude-opus-5.5:high").`,
+				);
+			}
+			const nl = trimmed.indexOf("\n");
+			const modelSelector = (nl === -1 ? trimmed : trimmed.slice(0, nl)).trim();
+			const followUp = nl === -1 ? undefined : trimmed.slice(nl + 1).trim() || undefined;
+			const switched = await switchSubagentModel({
+				caller: session,
+				targetId: id,
+				modelSelector,
+				prompt: followUp,
+			});
+			const text = switched.warning ? `${switched.summary}\nNote: ${switched.warning}` : switched.summary;
+			return {
+				content: [{ type: "text", text }],
+				details: { proc: { action: "model", ...switched } },
+			};
+		}
 		const ownerId = session.getAgentId?.() ?? undefined;
 		// Stamped before the broker lookup below: a job that settles while that
 		// await runs finished during this call, and the kill snapshot must say so

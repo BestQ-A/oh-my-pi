@@ -165,6 +165,8 @@ export type SeanceTaskSchemaFields = {
 	"model?"?: FluentType<string | string[]>;
 };
 
+// Same fields with the optional-marker stripped, so a key added to
+// `SeanceTaskSchemaFields` forces an entry in `GATED_ITEM_KEY_SET` above.
 type SeanceItemKey = {
 	[K in keyof SeanceTaskSchemaFields]-?: K extends `${infer Name}?` ? Name : never;
 }[keyof SeanceTaskSchemaFields];

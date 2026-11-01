@@ -187,7 +187,9 @@ describe("ComposerMarginHudFrame", () => {
 			expect(plain160).toContain("● MarginHudWorker 14s");
 			expect(plain160).toContain("MCP: ida · comp-use");
 			expect(plain160).toContain("●Omni ●IDA ○Purge ●HUD");
-			expect(plain160).toContain("▼ git:main*2 │ 服务 3/4 │ Tab 全选 · 1-3+Tab 选候选 · Alt+Q 额度舱 · Alt+H 四边舱");
+			expect(plain160).toContain(
+				"▼ git:main*2 │ 服务 3/4 │ Tab 全选 · 1-3+Tab 选候选 · Alt+Q 额度舱 · Alt+H 四边舱",
+			);
 
 			// 120 cols -> 3-Edge (no Left Wing, rightW=28, one 3-col divider -> centerW=89)
 			state.centerWidthsSeen = [];
@@ -408,6 +410,11 @@ describe("ComposerMarginHudFrame", () => {
 					url: "omp-ui:subagent:MarginHudWorker",
 					start: 130,
 					end: 130 + visibleWidth("● MarginHudWorker 14s"),
+				},
+				{
+					url: "omp-ui:subagent-model:MarginHudWorker",
+					start: 130 + visibleWidth("● MarginHudWorker 14s"),
+					end: 130 + visibleWidth("● MarginHudWorker 14s [⇄]"),
 				},
 			]);
 

@@ -805,6 +805,20 @@ if "__omp_prelude_loaded__" not in globals():
                 },
             )
 
+        def set_model(self, model, message=None):
+            selector = str(model or "").strip()
+            content = f"{selector}\n{message}" if message is not None and str(message).strip() else selector
+            return _bridge_call(
+                "write",
+                {
+                    "path": f"proc://{self.id}/model",
+                    "content": content,
+                    "i": "Switching subagent model",
+                },
+            )
+
+        setModel = set_model
+
         def output(self, **kwargs):
             return output(self.id, **kwargs)
 

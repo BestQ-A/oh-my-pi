@@ -193,10 +193,7 @@ export function buildCursorTabVirtualDocument(input: CursorTabCompletionInput): 
 /** Encode `aiserver.v1.StreamCppRequest` wrapped in a 5-byte Connect-RPC uncompressed envelope. */
 export function encodeStreamCppConnectFrame(input: CursorTabCompletionInput): Uint8Array {
 	const doc = buildCursorTabVirtualDocument(input);
-	const cursorPos = concatBytes(
-		pbVarintField(1, doc.cursorLineZeroIndexed),
-		pbVarintField(2, doc.cursorColUtf16),
-	);
+	const cursorPos = concatBytes(pbVarintField(1, doc.cursorLineZeroIndexed), pbVarintField(2, doc.cursorColUtf16));
 	const currentFile = concatBytes(
 		pbStringField(1, "PROMPT.md"),
 		pbStringField(2, doc.contents),

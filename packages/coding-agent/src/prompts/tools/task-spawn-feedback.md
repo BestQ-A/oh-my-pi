@@ -10,6 +10,6 @@ Spawned {{count}} background agent{{#unless singular}}s{{/unless}} using {{agent
 {{#if showListing}}{{#each started}}- `{{agentId}}` (job `{{jobId}}`)
 {{/each}}{{/if}}
 {{#if lifecycle}}
-read proc:// lists jobs/services; read proc://<id> inspects status/output without consuming delivery; write proc://<id>/kill cancels/stops, omit `content`.
+read proc:// lists jobs/services; read proc://<id> inspects status/output without consuming delivery; write proc://<id>/kill cancels/stops, omit `content`. read proc://<id>/model inspects a subagent's active model; write proc://<id>/model with a model selector{{#if ircEnabled}} (or `write agent://<id>?model=<model>` with optional steering instructions){{/if}} switches a running, failed, or parked subagent's model mid-flight and continues without losing progress.
 Job IDs are process-local; delivered results expire shortly (~30s), unconsumed results within ~5min. Agent output/transcripts remain readable at agent://<id> / history://<id>.{{#if ircEnabled}} write agent://<id> messages a live agent.{{/if}}
 {{/if}}

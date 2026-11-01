@@ -1,3 +1,5 @@
+import { buildModel } from "./build";
+import { providerEntry, seedModels } from "./compat/providers";
 import { classifyModel } from "./compat/taxonomy";
 import { getCatalogProvider, getCatalogProviders, openModelCatalog } from "./model-catalog-format";
 import modelsData from "./models.json" with { type: "json" };
@@ -27,20 +29,28 @@ const bundledProviders: readonly KnownProvider[] = Object.freeze(getCatalogProvi
 const bundledProviderSet = new Set<string>(bundledProviders);
 const modelRegistry = new Map<string, Map<string, Model<Api>>>();
 
-/** Return one provider's bundled models, materialized by the generator. */
+/** Return one provider's bundled models, materialized by the generator plus any `bundle="always"` KDL seeds. */
 function getProviderModels(provider: string): Map<string, Model<Api>> | undefined {
 	const cachedModels = modelRegistry.get(provider);
 	if (cachedModels !== undefined) return cachedModels;
 	const rawModels = getCatalogProvider(catalog, provider);
 	if (!rawModels) return undefined;
+	const alwaysSeeds = providerEntry(provider)?.seed?.bundle === "always" ? seedModels(provider) : [];
 
 	const providerModels = new Map<string, Model<Api>>();
-	for (const id in rawModels) {
-		const row = rawModels[id];
-		// Rows baked before the compat engine (and stale cache snapshots) lack
-		// `identity`; classify lazily so consumers can rely on the field.
-		row.identity ??= classifyModel(provider, id, { lenient: true });
-		providerModels.set(id, row);
+	if (rawModels) {
+		for (const id in rawModels) {
+			const row = rawModels[id];
+			// Rows baked before the compat engine (and stale cache snapshots) lack
+			// `identity`; classify lazily so consumers can rely on the field.
+			row.identity ??= classifyModel(provider, id, { lenient: true });
+			providerModels.set(id, row);
+		}
+	}
+	for (const seed of alwaysSeeds) {
+		if (!providerModels.has(seed.id)) {
+			providerModels.set(seed.id, buildModel(seed));
+		}
 	}
 	modelRegistry.set(provider, providerModels);
 	return providerModels;

@@ -70,7 +70,10 @@ describe("Mouse wheel scrollback under tui.mouse: true", () => {
 		term.sendInput("\x1b[<64;20;10M");
 		await term.waitForRender(() => mode.ui.hasOverlay());
 		expect(mode.ui.hasOverlay()).toBe(true);
-		const scrolledView = term.getViewport().map(r => Bun.stripANSI(r)).join("\n");
+		const scrolledView = term
+			.getViewport()
+			.map(r => Bun.stripANSI(r))
+			.join("\n");
 		expect(scrolledView).toContain("▲ 历史回看");
 		expect(scrolledView).toContain("[▼ 回到底部]");
 

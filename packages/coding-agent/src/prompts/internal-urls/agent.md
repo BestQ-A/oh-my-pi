@@ -1,1 +1,1 @@
-agent://<id>: latest completed output (status + progress while unpublished); nested IDs dotted, /key/index JSON path; write = message{{#unless subagent}}, agent://all broadcast only{{/unless}}.
+agent://<id>: latest completed output (status + progress while unpublished); nested IDs dotted, /key/index JSON path; write = message (agent://<id>?model=<model> or agent://<id>/model switches model mid-flight and continues){{#unless subagent}}, agent://all broadcast only{{/unless}}.

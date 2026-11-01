@@ -34,10 +34,17 @@ export interface ProcReadDetails {
 
 export type ProcWriteDetails =
 	| CoordinationDetails
-	| { action: "stop" | "stdin" | "mode"; daemon: DaemonSnapshot; input?: string; mode?: string };
+	| { action: "stop" | "stdin" | "mode"; daemon: DaemonSnapshot; input?: string; mode?: string }
+	| {
+			action: "model";
+			agentId: string;
+			model: string;
+			previousModel?: string;
+			summary?: string;
+	  };
 
 /** Process operation selected by a write URL, independent of its content. */
-export type ProcWriteAction = "stdin" | "mode" | "kill";
+export type ProcWriteAction = "stdin" | "mode" | "kill" | "model";
 
 function preview(body: string, expanded: boolean, theme: Theme, tone: "dim" | "toolOutput" = "dim"): string[] {
 	if (!body.trim()) return [];
@@ -162,13 +169,21 @@ export function renderProcWrite(
 				icon:
 					result === undefined ? "pending" : result.isError ? "error" : action === "kill" ? "aborted" : "success",
 				title,
-				meta: daemon ? daemonMeta(daemon, theme) : action === "mode" && content ? [safe(content)] : [],
+				meta: daemon
+					? daemonMeta(daemon, theme)
+					: (action === "mode" || action === "model") && content
+						? [safe(content.split("\n")[0] ?? content)]
+						: [],
 			},
 			theme,
 		);
 		if (result?.isError) return [header, formatErrorDetail(firstText(result) || "Process operation failed.", theme)];
 		const lines = [header];
 		if (content && action === "stdin") lines.push(...preview(content, expanded, theme));
+		if (action === "model" && result) {
+			const summaryText = firstText(result);
+			if (summaryText) lines.push(...preview(summaryText, expanded, theme));
+		}
 		if (details && "op" in details && details.op === "cancel") {
 			const jobs = details.jobs ?? [];
 			const outcomes = details.cancelled ?? [];
@@ -384,12 +399,22 @@ export function describeProcWrite(
 	const head = toolHead(
 		`Proc ${action}`,
 		span(safe(id || "…"), "accent"),
-		daemon ? daemonMetaText(daemon) : action === "mode" && content ? safe(content) : undefined,
+		daemon
+			? daemonMetaText(daemon)
+			: (action === "mode" || action === "model") && content
+				? safe(content.split("\n")[0] ?? content)
+				: undefined,
 	);
 	if (result?.isError) {
 		return { head, tone: "error", body: [errorText(firstText(result) || "Process operation failed.")] };
 	}
-	const body = compact<NativeChild>([content && action === "stdin" ? quotedPreview(content) : undefined]);
+	const body = compact<NativeChild>([
+		content && action === "stdin"
+			? quotedPreview(content)
+			: action === "model" && result
+				? quotedPreview(firstText(result))
+				: undefined,
+	]);
 	if (details && "op" in details && details.op === "cancel") {
 		const jobs = details.jobs ?? [];
 		body.push(

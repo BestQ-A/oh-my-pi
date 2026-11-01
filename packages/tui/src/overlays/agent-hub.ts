@@ -198,6 +198,7 @@ function agentHints(nextView: string): readonly NativeHint[] {
 		{ keys: ["enter"], label: "open" },
 		{ keys: ["t"], label: nextView },
 		{ keys: ["/"], label: "filter" },
+		{ keys: ["m"], label: "model" },
 		{ keys: ["r"], label: "revive" },
 		{ keys: ["x"], label: "kill" },
 		{ keys: ["escape"], label: "close" },
@@ -354,6 +355,8 @@ export interface AgentHubDeps<TRecord extends AgentRecordLike = AgentRecordLike>
 	expandKeys?: KeyId[];
 	/** Focus the main view on this agent's live session (ctx.focusAgentSession). When absent (collab guest, tests), Enter opens the in-hub chat view instead. */
 	focusAgent?: (id: string) => Promise<void>;
+	/** Open a mid-flight model switcher for this subagent and report any inline notice back to the hub. */
+	switchAgentModel?: (id: string, setNotice: (notice: string) => void) => void;
 	/** Current main session file; used to seed parked historical subagents after restart. */
 	sessionFile?: string | null;
 	/** Initial top-level projection; slash commands deep-link into this surface. */
@@ -506,6 +509,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#expandThinkingBlocks: (() => boolean) | undefined;
 	#expandKeys: KeyId[];
 	#focusAgent: ((id: string) => Promise<void>) | undefined;
+	#switchAgentModel: ((id: string, setNotice: (notice: string) => void) => void) | undefined;
 
 	// Fullscreen transcript overlay opened by openChat(), if any.
 	#transcriptOverlay: OverlayHandle | undefined;
@@ -557,6 +561,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		this.#expandThinkingBlocks = deps.expandThinkingBlocks;
 		this.#expandKeys = deps.expandKeys ?? ["ctrl+o"];
 		this.#focusAgent = deps.focusAgent;
+		this.#switchAgentModel = deps.switchAgentModel;
 
 		this.#unsubscribers.push(this.#registry.onChange(() => this.#scheduleDataChange()));
 		this.#unsubscribers.push(this.#observers.onChange(() => this.#scheduleDataChange()));
@@ -903,6 +908,9 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			case "revive":
 				this.#reviveSelected();
 				return;
+			case "model":
+				this.#switchModelSelected();
+				return;
 			case "kill":
 				this.#killSelected();
 				return;
@@ -959,6 +967,22 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 						? undefined
 						: "Only parked or killed agents can be revived"),
 			},
+			...(this.#switchAgentModel
+				? [
+						{
+							id: "model",
+							label: "Model",
+							keys: ["m"],
+							disabled:
+								readOnly ??
+								(this.#remote
+									? "Model switching is unavailable on remote sessions"
+									: selected
+										? undefined
+										: true),
+						} satisfies TspPickerAction,
+					]
+				: []),
 			{ id: "kill", label: "Kill", keys: ["x"], danger: true, disabled: readOnly ?? (selected ? undefined : true) },
 			{ id: "view", label: "By parent", keys: ["t"], on: this.#viewMode === "tree" },
 			{ id: "filter", label: "Filter", keys: ["/"] },
@@ -1945,12 +1969,13 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		if (availableWidth < 96) {
 			return theme.fg(
 				"dim",
-				`${filter}${formatKeyHints(["j", "k"])}:select  ${formatKeyHint("enter")}:open  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("tab")}:details  ${formatKeyHints(["r", "x"])}:manage  ${formatKeyHint("escape")}:close`,
+				`${filter}${formatKeyHints(["j", "k"])}:select  ${formatKeyHint("enter")}:open  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("tab")}:details  ${formatKeyHints(["m", "r", "x"])}:manage  ${formatKeyHint("escape")}:close`,
 			);
 		}
+		const modelHint = this.#switchAgentModel && !this.#remote ? `  ${formatKeyHint("m")}:model` : "";
 		return theme.fg(
 			"dim",
-			`${filter}1:agents  2:activity  ${formatKeyHints(["j", "k"])}/wheel:select  ${formatKeyHints(["pageUp", "pageDown"])}:details  ${formatKeyHint("enter")}/click:open  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("r")}:revive  ${formatKeyHint("x")}:kill  ${formatKeyHint("escape")}:close`,
+			`${filter}1:agents  2:activity  ${formatKeyHints(["j", "k"])}/wheel:select  ${formatKeyHints(["pageUp", "pageDown"])}:details  ${formatKeyHint("enter")}/click:open  ${formatKeyHint("t")}:${nextView}${modelHint}  ${formatKeyHint("r")}:revive  ${formatKeyHint("x")}:kill  ${formatKeyHint("escape")}:close`,
 		);
 	}
 
@@ -2600,6 +2625,10 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			this.#reviveSelected();
 			return;
 		}
+		if (keyData === "m") {
+			this.#switchModelSelected();
+			return;
+		}
 		if (keyData === "x") {
 			this.#killSelected();
 			return;
@@ -2659,6 +2688,32 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 				this.#requestRender();
 			});
 		this.#requestRender();
+	}
+
+	#switchModelSelected(): void {
+		const ref = this.#rows[this.#selectedRow];
+		if (!ref) return;
+		if (ref.kind === "advisor") {
+			this.#notice = `"${ref.id}" is a read-only advisor transcript — its model cannot be switched.`;
+			this.#requestRender();
+			return;
+		}
+		if (ref.id === MAIN_AGENT_ID) {
+			this.#notice = `"${ref.id}" is the primary session — use /model or /switch instead.`;
+			this.#requestRender();
+			return;
+		}
+		if (this.#remote || !this.#switchAgentModel) {
+			this.#notice = "Mid-flight subagent model switching is unavailable in this view.";
+			this.#requestRender();
+			return;
+		}
+		this.#notice = undefined;
+		this.#switchAgentModel(ref.id, notice => {
+			this.#notice = notice;
+			this.#refreshRows();
+			this.#requestRender();
+		});
 	}
 
 	#killSelected(): void {

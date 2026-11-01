@@ -2413,8 +2413,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				getTodoPhases: () => this.todoPhases,
 				getSubagentSummary: () => {
 					const viewSession = this.viewSession;
-					const tree =
-						typeof viewSession.getAsyncJobTree === "function" ? viewSession.getAsyncJobTree() : null;
+					const tree = typeof viewSession.getAsyncJobTree === "function" ? viewSession.getAsyncJobTree() : null;
 					if (!tree) return { running: [], recent: [] };
 					const now = Date.now();
 					const resolveFocusId = (job: unknown): string | undefined => {
@@ -4759,6 +4758,17 @@ export class InteractiveMode implements InteractiveModeContext {
 			void this.focusAgentSession(agentId).catch((err: unknown) => {
 				this.showStatus(err instanceof Error ? err.message : String(err));
 			});
+			return true;
+		}
+		if (url.startsWith("omp-ui:subagent-model:")) {
+			let agentId: string;
+			try {
+				agentId = decodeURIComponent(url.slice("omp-ui:subagent-model:".length)).trim();
+			} catch {
+				return false;
+			}
+			if (!agentId) return false;
+			this.showSubagentModelPicker(agentId);
 			return true;
 		}
 		return false;
@@ -9937,6 +9947,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void> {
 		return this.#selectorController.switchSessionModel(model, thinkingLevel);
+	}
+
+	showSubagentModelPicker(agentId: string): void {
+		this.#selectorController.showSubagentModelPicker(agentId);
 	}
 
 	showPluginSelector(mode?: "install" | "uninstall"): void {

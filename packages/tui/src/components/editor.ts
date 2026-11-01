@@ -1187,11 +1187,7 @@ export class Editor implements Component, Focusable {
 			this.#replaceLineWithPrediction(picked.text);
 			return true;
 		}
-		return (
-			this.#acceptPrediction() ||
-			this.#acceptInlineCompletion() ||
-			this.#acceptWordCompletion({ space: true })
-		);
+		return this.#acceptPrediction() || this.#acceptInlineCompletion() || this.#acceptWordCompletion({ space: true });
 	}
 
 	/** Accept the next chunk of the active ghost prediction, inline completion, or word completion. */

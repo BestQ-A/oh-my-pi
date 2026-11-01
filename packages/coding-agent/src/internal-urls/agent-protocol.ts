@@ -31,6 +31,7 @@ import agentProgressTemplate from "../prompts/tools/agent-url-progress.md" with 
 import agentSupersededTemplate from "../prompts/tools/agent-url-superseded.md" with { type: "text" };
 import { loadSessionMessagesReadOnly } from "../session/session-loader";
 import { artifactsDirsFromRegistry } from "./registry-helpers";
+import { switchSubagentModel } from "../task/subagent-model-switch";
 import type {
 	InternalResource,
 	InternalWriteResult,
@@ -147,7 +148,13 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		selectors: "lines",
 		immutable: true,
 		linkable: true,
-		write: { via: "handler", payload: "verbatim", scope: "coordination", tier: () => "read" },
+		write: {
+			via: "handler",
+			payload: "verbatim",
+			scope: "coordination",
+			tier: () => "read",
+			contentOptional: url => url.searchParams.has("model"),
+		},
 	};
 
 	promptDoc(host: SchemeHost): string {
@@ -173,6 +180,43 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	async write(url: InternalUrl, content: string, context?: WriteContext): Promise<InternalWriteResult> {
 		const session = context?.session;
 		if (!session) throw new Error("agent:// messaging requires a tool session");
+		const to = url.rawHost || url.hostname;
+		if (!to) throw new Error("agent:// URL requires a recipient: agent://<id>");
+		const rawPath = url.rawPathname ?? url.pathname;
+		const isModelPath = rawPath === "/model" || rawPath === "/model/";
+		const queryModel = url.searchParams.get("model")?.trim();
+		if (isModelPath || queryModel) {
+			if (to === "all") {
+				throw new Error("agent://all cannot switch models; target a specific subagent id.");
+			}
+			const trimmed = content.trim();
+			let modelSelector = queryModel ?? "";
+			let followUp: string | undefined;
+			if (isModelPath && !modelSelector) {
+				const nl = trimmed.indexOf("\n");
+				modelSelector = (nl === -1 ? trimmed : trimmed.slice(0, nl)).trim();
+				followUp = nl === -1 ? undefined : trimmed.slice(nl + 1).trim() || undefined;
+			} else {
+				followUp = trimmed || undefined;
+			}
+			if (!modelSelector) {
+				throw new Error(
+					`Model selector is required (e.g. write agent://${to}/model with content "<model>" or write agent://${to}?model=<model>).`,
+				);
+			}
+			const switched = await switchSubagentModel({
+				caller: session,
+				targetId: to,
+				modelSelector,
+				prompt: followUp,
+			});
+			const text = switched.warning ? `${switched.summary}\nNote: ${switched.warning}` : switched.summary;
+			return {
+				content: [{ type: "text", text }],
+				details: { proc: { action: "model", ...switched } },
+			};
+		}
+
 		const registry = session.agentRegistry;
 		const senderId = session.getAgentId?.();
 		if (
@@ -183,8 +227,6 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		) {
 			throw new Error("Peer messaging is unavailable in this session.");
 		}
-		const to = url.rawHost || url.hostname;
-		if (!to) throw new Error("agent:// URL requires a recipient: agent://<id>");
 		if (hasPathExtraction(url)) {
 			throw new Error("agent:// message target cannot have a JSON-path suffix.");
 		}

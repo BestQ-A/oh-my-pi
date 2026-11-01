@@ -3,6 +3,28 @@
 provider "minimax-code-cn" priority=1 {
 	default-model "MiniMax-M3"
 	env "MINIMAX_CODE_CN_API_KEY"
+	image-model "image-01"
+
+	seed base-url="https://api.minimaxi.com" bundle="always" {
+		model "image-01" name="MiniMax Image-01" api="openai-images" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "image-01-live" name="MiniMax Image-01 Live" api="openai-images" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
+
+	models "image-01" "image-01-live" {
+		kind "image"
+	}
 
 	// Replaces the provider-id regex in both OpenAI baselines.
 	reasoning-deltas-may-be-cumulative #true

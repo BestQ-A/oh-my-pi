@@ -3,14 +3,7 @@ import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-	type Component,
-	CURSOR_MARKER,
-	padding,
-	replaceTabs,
-	truncateToWidth,
-	visibleWidth,
-} from "@oh-my-pi/pi-tui";
+import { type Component, CURSOR_MARKER, padding, replaceTabs, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { formatActionMarker } from "@oh-my-pi/pi-tui/render/extension-links";
 import type { QuotaPoolCapsule } from "@oh-my-pi/pi-tui/status-line";
 import { type ThemeColor, theme } from "@oh-my-pi/pi-tui/theme";
@@ -168,9 +161,7 @@ export function shortenGpuName(rawName: string): string {
 	return trimmed.length > 0 ? trimmed : sanitizeSingleLine(rawName);
 }
 
-export function parseNvidiaSmiCsv(
-	stdout: string,
-): MarginHudTelemetrySnapshot["gpu"] | undefined {
+export function parseNvidiaSmiCsv(stdout: string): MarginHudTelemetrySnapshot["gpu"] | undefined {
 	for (const rawLine of stdout.split(/\r?\n/)) {
 		const line = rawLine.trim();
 		if (line.length === 0) continue;
@@ -445,11 +436,7 @@ export class MarginHudTelemetryCollector {
 
 	#commitPatch(generation: number, patch: Partial<MarginHudTelemetrySnapshot>, clearGit = false): void {
 		if (generation !== this.#generation) return;
-		const nextBranch = clearGit
-			? undefined
-			: "gitBranch" in patch
-				? patch.gitBranch
-				: this.#snapshot.gitBranch;
+		const nextBranch = clearGit ? undefined : "gitBranch" in patch ? patch.gitBranch : this.#snapshot.gitBranch;
 		const nextGpu = "gpu" in patch ? patch.gpu : this.#snapshot.gpu;
 		const nextCpu = "cpuPct" in patch ? patch.cpuPct : this.#snapshot.cpuPct;
 		const nextSnapshot: MarginHudTelemetrySnapshot = {
@@ -803,8 +790,7 @@ export class ComposerMarginHudFrame implements Component {
 			);
 		}
 		const cpuText = snapshot.cpuPct !== undefined ? `${snapshot.cpuPct}%` : "--%";
-		const cpuColor: ThemeColor =
-			snapshot.cpuPct !== undefined && snapshot.cpuPct >= 85 ? "warning" : "muted";
+		const cpuColor: ThemeColor = snapshot.cpuPct !== undefined && snapshot.cpuPct >= 85 ? "warning" : "muted";
 		hwParts.push(fg(cpuColor, `CPU ${cpuText}`));
 		hwParts.push(fg("muted", `RAM ${snapshot.ramUsedGb}/${snapshot.ramTotalGb}G`));
 		const hwSection = hwParts.join(dot);
@@ -832,11 +818,7 @@ export class ComposerMarginHudFrame implements Component {
 		const showLeft = width >= FULL_COCKPIT_MIN_WIDTH;
 		const showRight = width >= THREE_EDGE_MIN_WIDTH;
 		const leftW = showLeft ? FULL_LEFT_WING_WIDTH : 0;
-		const rightW = showLeft
-			? FULL_RIGHT_WING_WIDTH
-			: showRight
-				? THREE_EDGE_RIGHT_WING_WIDTH
-				: 0;
+		const rightW = showLeft ? FULL_RIGHT_WING_WIDTH : showRight ? THREE_EDGE_RIGHT_WING_WIDTH : 0;
 		const dividerCols = (showLeft ? WING_DIVIDER_WIDTH : 0) + (showRight ? WING_DIVIDER_WIDTH : 0);
 		const centerW = Math.max(1, width - leftW - rightW - dividerCols);
 
@@ -983,6 +965,15 @@ export class ComposerMarginHudFrame implements Component {
 						href,
 						key: `right:running:${index}:${id ?? label}`,
 					},
+					...(id
+						? [
+								{
+									text: ` ${fg("muted", "[⇄]")}`,
+									href: `omp-ui:subagent-model:${encodeURIComponent(id)}`,
+									key: `right:running:model:${index}:${id}`,
+								} satisfies HudSegment,
+							]
+						: []),
 				]);
 			}
 		} else if (subagents.recent.length > 0) {
@@ -1004,6 +995,15 @@ export class ComposerMarginHudFrame implements Component {
 						href,
 						key: `right:recent:${index}:${id ?? label}`,
 					},
+					...(id
+						? [
+								{
+									text: ` ${fg("dim", "[⇄]")}`,
+									href: `omp-ui:subagent-model:${encodeURIComponent(id)}`,
+									key: `right:recent:model:${index}:${id}`,
+								} satisfies HudSegment,
+							]
+						: []),
 				]);
 			}
 		} else {
