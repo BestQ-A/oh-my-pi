@@ -66,6 +66,18 @@ async function main(): Promise<void> {
 		// Embed metadata for the same content-addressed viewer used by source exports.
 		// Generate here too for clean checkouts that skipped install hooks.
 		await runCommand(["bun", "--cwd=../collab-web", "run", "gen:export-viewer"]);
+		const viewerManifest: unknown = await Bun.file(
+			path.join(packageDir, "src", "export", "html", "viewer.generated.json"),
+		).json();
+		if (
+			typeof viewerManifest !== "object" ||
+			viewerManifest === null ||
+			!("file" in viewerManifest) ||
+			typeof viewerManifest.file !== "string"
+		) {
+			throw new Error("viewer.generated.json has no string file field");
+		}
+		const exportViewerEmbed = await Bun.file(path.join(packageDir, "export-assets", viewerManifest.file)).text();
 		await compileCodingAgent({
 			repoRoot,
 			entrypoint: path.join(packageDir, "src", "cli.ts"),
@@ -74,6 +86,7 @@ async function main(): Promise<void> {
 			target: crossBuild?.target,
 			executablePath: Bun.env.BUN_COMPILE_EXECUTABLE_PATH || undefined,
 			skipBuiltinCodesign: shouldAdhocSign,
+			exportViewerEmbed,
 		});
 
 		if (shouldAdhocSign) {

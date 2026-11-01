@@ -166,6 +166,9 @@ class "gemini" {
 			supports-function-part-id #true
 		}
 	}
+	on-api "openai-completions" {
+		gemini-empty-tool-array-workaround #true
+	}
 	on "google-antigravity" "google-gemini-cli" {
 		family "flash" {
 			stream-first-event-timeout-ms 60000

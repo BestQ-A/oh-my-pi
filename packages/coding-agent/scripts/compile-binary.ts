@@ -34,6 +34,8 @@ export interface CodingAgentCompileOptions {
 	readonly minifyIdentifiers?: boolean;
 	/** Disable Bun's built-in Darwin signing before the caller re-signs. */
 	readonly skipBuiltinCodesign?: boolean;
+	/** Optional export-viewer bundle inlined into local standalone builds that have no published CDN asset. */
+	readonly exportViewerEmbed?: string;
 }
 
 /**
@@ -54,6 +56,9 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 			define: {
 				"process.env.PI_COMPILED": JSON.stringify("true"),
 				"process.env.PI_DOCS_EMBED": JSON.stringify((await buildDocsIndexPayload()).payload),
+				...(options.exportViewerEmbed
+					? { "process.env.PI_EXPORT_VIEWER_EMBED": JSON.stringify(options.exportViewerEmbed) }
+					: {}),
 			},
 			// Precompiled bytecode skips parsing the ~20 MB bundle at boot:
 			// `omp --version` 256 ms -> 30 ms on M4 Max (+52 MB binary).

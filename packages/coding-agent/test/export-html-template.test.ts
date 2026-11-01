@@ -155,6 +155,27 @@ describe("HTML export template", () => {
 		expect(await fs.readdir(bundleDir)).toEqual([path.basename(bundlePath)]);
 	});
 
+	test("local standalone builds with PI_EXPORT_VIEWER_EMBED inline the viewer without requesting build.stencil.so", async () => {
+		const embeddedCompiledPath = path.join(tempRoot, "embedded-compiled-template-probe");
+		const embeddedCompiled = await Bun.build({
+			entrypoints: [probePath],
+			target: "bun",
+			plugins: [focusedBundlePlugin],
+			define: {
+				"process.env.PI_BUNDLED": '"true"',
+				"process.env.PI_EXPORT_VIEWER_EMBED": JSON.stringify('window.__LOCAL_VIEWER="</script><ok>";'),
+			},
+			compile: { outfile: embeddedCompiledPath },
+		});
+		if (!embeddedCompiled.success) throw new AggregateError(embeddedCompiled.logs, "Embedded compiled probe failed");
+		const html = await runProbe([embeddedCompiledPath]);
+		const { document } = parseHTML(html);
+		const scripts = document.querySelectorAll("script[src]");
+		expect(scripts).toHaveLength(2);
+		expect(html).toContain('window.__LOCAL_VIEWER="<\\/script><ok>";');
+		expect(html).not.toContain("build.stencil.so");
+	});
+
 	test("npm packages keep the tiny loader and metadata but omit hosted viewer source assets", async () => {
 		const productionDir = path.join(tempRoot, "production-bundle");
 		const staleAsset = path.join(productionDir, "template-stale.css");

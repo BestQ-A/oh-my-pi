@@ -143,6 +143,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"extra-body": { ...wire("extraBody", ["openai"], "object"), verbatimKeys: true },
 	"filter-reasoning-history": wire("filterReasoningHistory", OAI),
 	"include-encrypted-reasoning": wire("includeEncryptedReasoning", OAI),
+	"gemini-empty-tool-array-workaround": wire("geminiEmptyToolArrayWorkaround", ["openai"]),
 	"kimi-api-format": wire("kimiApiFormat", ["openai"], "scalar", ["openai", "anthropic"]),
 	"max-tokens-field": wire("maxTokensField", ["openai"], "scalar", ["max_completion_tokens", "max_tokens"]),
 	"mistral-reasoning-content-parts": wire("mistralReasoningContentParts", ["openai"]),
