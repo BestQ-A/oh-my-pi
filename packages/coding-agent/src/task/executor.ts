@@ -2102,48 +2102,54 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				const role = event.message?.role;
 				if (role === "assistant") {
 					assistantStreaming = false;
-					sawAssistantMessage = true;
-					progress.requests += 1;
-					const eventContent = isRecord(event) && "content" in event ? event.content : undefined;
-					const messageContent = getMessageContent(event.message) || eventContent;
-					if (messageContent && Array.isArray(messageContent)) {
-						const turnText: string[] = [];
-						let startedMoreWork = false;
-						let completedServerWork = false;
-						for (const block of messageContent) {
-							if (!isRecord(block)) continue;
-							if (block.type === "text" && typeof block.text === "string") {
-								outputChunks.push(block.text);
-								if (block.text) turnText.push(block.text);
-								continue;
-							}
-							if (block.type !== "toolCall" || typeof block.name !== "string") continue;
-							if (block.name === "yield") {
-								if (!yieldCalled) {
-									yieldCallPending = true;
-									flushProgress = true;
+					const abortedForModelSwitch =
+						activeSession?.isModelSwitchHandoffInProgress === true &&
+						isRecord(event.message) &&
+						event.message.stopReason === "aborted";
+					if (!abortedForModelSwitch) {
+						sawAssistantMessage = true;
+						progress.requests += 1;
+						const eventContent = isRecord(event) && "content" in event ? event.content : undefined;
+						const messageContent = getMessageContent(event.message) || eventContent;
+						if (messageContent && Array.isArray(messageContent)) {
+							const turnText: string[] = [];
+							let startedMoreWork = false;
+							let completedServerWork = false;
+							for (const block of messageContent) {
+								if (!isRecord(block)) continue;
+								if (block.type === "text" && typeof block.text === "string") {
+									outputChunks.push(block.text);
+									if (block.text) turnText.push(block.text);
+									continue;
 								}
-								continue;
+								if (block.type !== "toolCall" || typeof block.name !== "string") continue;
+								if (block.name === "yield") {
+									if (!yieldCalled) {
+										yieldCallPending = true;
+										flushProgress = true;
+									}
+									continue;
+								}
+								if (isCursorExecResolved(block)) completedServerWork = true;
+								else startedMoreWork = true;
+								turnText.length = 0;
 							}
-							if (isCursorExecResolved(block)) completedServerWork = true;
-							else startedMoreWork = true;
-							turnText.length = 0;
+							// Locally runnable calls make all prose in or before this turn
+							// mid-work narration. Cursor exec-resolved calls already ran, so
+							// text after the last one is a report; without such text, prior
+							// prose predates that work and is invalidated.
+							const text = turnText.join("\n");
+							if (startedMoreWork) lastReportTurnText = undefined;
+							else if (text.trim()) lastReportTurnText = text;
+							else if (completedServerWork) lastReportTurnText = undefined;
 						}
-						// Locally runnable calls make all prose in or before this turn
-						// mid-work narration. Cursor exec-resolved calls already ran, so
-						// text after the last one is a report; without such text, prior
-						// prose predates that work and is invalidated.
-						const text = turnText.join("\n");
-						if (startedMoreWork) lastReportTurnText = undefined;
-						else if (text.trim()) lastReportTurnText = text;
-						else if (completedServerWork) lastReportTurnText = undefined;
+						// A yield awaiting validation suppresses the budget check for
+						// its own turn (#5006). Defer it rather than drop it: every
+						// yield turn latches the pending flag, so dropping the check
+						// lets a run of yield-only turns never account for a request.
+						if (yieldCallPending) budgetCheckDeferred = true;
+						else evaluateSoftRequestBudget();
 					}
-					// A yield awaiting validation suppresses the budget check for
-					// its own turn (#5006). Defer it rather than drop it: every
-					// yield turn latches the pending flag, so dropping the check
-					// lets a run of yield-only turns never account for a request.
-					if (yieldCallPending) budgetCheckDeferred = true;
-					else evaluateSoftRequestBudget();
 				}
 				// Extract and accumulate usage (prefer message.usage, fallback to event.usage)
 				const eventUsage = isRecord(event) && "usage" in event ? event.usage : undefined;
@@ -2185,7 +2191,11 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 
 			case "agent_end":
 				// Extract final content from assistant messages only (not user prompts)
-				if (event.messages && Array.isArray(event.messages)) {
+				if (
+					activeSession?.isModelSwitchHandoffInProgress !== true &&
+					event.messages &&
+					Array.isArray(event.messages)
+				) {
 					for (const msg of event.messages) {
 						if ((msg as { role?: string })?.role !== "assistant") continue;
 						const messageContent = getMessageContent(msg);
@@ -2544,37 +2554,61 @@ async function driveSessionToResult(
 	};
 
 	try {
-		try {
-			// An IRC wake may own the session when this turn dispatches. Its prompt
-			// wins the race and this prompt throws AgentBusyError; back off through
-			// the caller hook and retry. Bounded so a wedged worker still resolves
-			// instead of hanging the batch.
-			let promptAttempts = 0;
-			for (;;) {
-				try {
-					if (restore) await awaitAbortable(session.restoreInterruptedTurn());
-					else await dispatchPrompt(task, { attribution: "agent", solutionSpace }, "initial prompt");
+		let observedHandoffEpoch = session.modelSwitchHandoffEpoch;
+		for (;;) {
+			try {
+				// An IRC wake may own the session when this turn dispatches. Its prompt
+				// wins the race and this prompt throws AgentBusyError; back off through
+				// the caller hook and retry. Bounded so a wedged worker still resolves
+				// instead of hanging the batch.
+				let promptAttempts = 0;
+				for (;;) {
+					try {
+						if (restore) await awaitAbortable(session.restoreInterruptedTurn());
+						else await dispatchPrompt(task, { attribution: "agent", solutionSpace }, "initial prompt");
+						break;
+					} catch (error) {
+						if (
+							session.isModelSwitchHandoffInProgress ||
+							session.modelSwitchHandoffEpoch !== observedHandoffEpoch
+						) {
+							throw error;
+						}
+						promptAttempts++;
+						if (!(error instanceof AgentBusyError) || promptAttempts >= 3 || !onPromptBusy) throw error;
+						await onPromptBusy();
+					}
+				}
+				await awaitAbortable(session.waitForIdle());
+			} catch (err) {
+				const midFlightModelSwitch =
+					session.isModelSwitchHandoffInProgress || session.modelSwitchHandoffEpoch !== observedHandoffEpoch;
+				if (midFlightModelSwitch && !abortSignal.aborted) {
+					observedHandoffEpoch = session.modelSwitchHandoffEpoch;
+					await awaitAbortable(session.waitForIdle());
+					if (!restore && session.messages.length === 0) {
+						continue;
+					}
 					break;
-				} catch (error) {
-					promptAttempts++;
-					if (!(error instanceof AgentBusyError) || promptAttempts >= 3 || !onPromptBusy) throw error;
-					await onPromptBusy();
+				}
+				// A budget stop or a yield turn-stop (terminal yield parked behind
+				// the async quiescence barrier) cancels the free-running turn by
+				// aborting the session, which can surface here as a rejected
+				// prompt. Swallow it and drive the barrier/forced final yield
+				// below; real caller/timeout aborts (monitor signal) and genuine
+				// failures keep the old path.
+				const recoverableStop = monitor.budgetStopRequested() || monitor.yieldTurnStopRequested();
+				if (!recoverableStop || abortSignal.aborted || err instanceof PromptDispatchError) throw err;
+			}
+			if (session.isModelSwitchHandoffInProgress || session.modelSwitchHandoffEpoch !== observedHandoffEpoch) {
+				observedHandoffEpoch = session.modelSwitchHandoffEpoch;
+				await awaitAbortable(session.waitForIdle());
+				if (!restore && session.messages.length === 0) {
+					continue;
 				}
 			}
-			await awaitAbortable(session.waitForIdle());
-		} catch (err) {
-			// A budget stop or a yield turn-stop (terminal yield parked behind
-			// the async quiescence barrier) cancels the free-running turn by
-			// aborting the session, which can surface here as a rejected
-			// prompt. Swallow it and drive the barrier/forced final yield
-			// below; real caller/timeout aborts (monitor signal) and genuine
-			// failures keep the old path.
-			const recoverableStop = monitor.budgetStopRequested() || monitor.yieldTurnStopRequested();
-			if (!recoverableStop || abortSignal.aborted || err instanceof PromptDispatchError) throw err;
+			break;
 		}
-
-		// The forced final turn must answer through `yield`, or with no tools at all.
-		const reminderToolChoice = structured ? buildNamedToolChoice("yield", session.model) : "none";
 
 		const runYieldLadder = async (): Promise<void> => {
 			let retryCount = 0;
@@ -2599,6 +2633,7 @@ async function driveSessionToResult(
 				// A turn waiting on owner work is a scheduling pause. The outer
 				// barrier settles that work before a reminder counts against it.
 				if (!budgetStop && session.hasPendingAsyncWork()) break;
+				const reminderEpoch = session.modelSwitchHandoffEpoch;
 				try {
 					retryCount++;
 					const reminder = prompt.render(submitReminderTemplate, {
@@ -2609,10 +2644,9 @@ async function driveSessionToResult(
 					});
 
 					const isFinalRetry = retryCount >= MAX_YIELD_RETRIES;
-					// Last chance: the next accepted yield ends the run, incremental
-					// or not, so the pinned model cannot answer the pin forever.
-					// Armed for this prompt's turn only — the quiescence barrier's
-					// later notice turn may legitimately submit more sections.
+					// Recompute against current `session.model` in case the subagent switched
+					// providers mid-run (OpenAI vs Anthropic/Google toolChoice wire shape).
+					const reminderToolChoice = structured ? buildNamedToolChoice("yield", session.model) : "none";
 					retriesForced = isFinalRetry;
 					await dispatchPrompt(
 						reminder,
@@ -2625,13 +2659,24 @@ async function driveSessionToResult(
 						{ forceFinalYield: isFinalRetry },
 					);
 					await awaitAbortable(session.waitForIdle());
+					if (
+						!monitor.yieldCalled() &&
+						(session.isModelSwitchHandoffInProgress || session.modelSwitchHandoffEpoch !== reminderEpoch)
+					) {
+						retryCount = Math.max(0, retryCount - 1);
+						await awaitAbortable(session.waitForIdle());
+					}
 				} catch (err) {
+					if (
+						!abortSignal.aborted &&
+						(session.isModelSwitchHandoffInProgress || session.modelSwitchHandoffEpoch !== reminderEpoch)
+					) {
+						retryCount = Math.max(0, retryCount - 1);
+						await awaitAbortable(session.waitForIdle());
+						continue;
+					}
 					if (err instanceof PromptDispatchError) throw err;
 					if (abortSignal.aborted || err instanceof ToolAbortError) {
-						// Benign control-flow exit — user cancel (^C) or compaction aborting
-						// pending operations both surface here as ToolAbortError. The outer
-						// catch and finally already mark the run aborted; logging at ERROR
-						// would spam operator dashboards with non-failures.
 						logger.debug("Subagent prompt aborted");
 					} else {
 						logger.error("Subagent prompt failed", {
@@ -3378,7 +3423,20 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 
 		turnMonitor.setActiveSession(session);
 		const unsubscribeTurn = turnMonitor.attach(session);
-		if (ownerWoken) registerWakeJob();
+		// A focused-session user prompt (#14428) or an explicit model-switch resume
+		// (`proc://<id>/model` / `agent://<id>/model` on a failed or interrupted child)
+		// publishes the recovered turn as the subagent's new result. A model-switch
+		// resume also registers a wake job immediately so the parent's `wait` receives it.
+		const userPrompted = records.some(record =>
+			record.role === "user" ? record.attribution === "user" : record.role === "developer" && record.userInitiated,
+		);
+		const modelSwitchResumed = records.some(
+			record =>
+				record.role === "developer" &&
+				record.userInitiated === true &&
+				extractIrcRecordText(record.content).startsWith("[model-switch-resume]"),
+		);
+		if (ownerWoken || modelSwitchResumed) registerWakeJob();
 		// Only a message_end from the agent loop proves the queued parent steer
 		// entered this turn. Receipt alone cannot claim a peer's earlier answer.
 		let ownerPrompted = false;
@@ -3387,11 +3445,6 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			ownerPrompted = true;
 			registerWakeJob();
 		});
-		// A focused-session user prompt is the operator driving this agent (#14428):
-		// like a parent follow-up, its message-result reply is the agent's new result.
-		const userPrompted = records.some(record =>
-			record.role === "user" ? record.attribution === "user" : record.role === "developer" && record.userInitiated,
-		);
 		return async turnError => {
 			unsubscribeTurn();
 			unsubscribeParentSteer();

@@ -397,13 +397,12 @@ describe("task.batch validation", () => {
 	// `task.structured` and `task.isolation.enabled` choose between the prebuilt and
 	// generated batch schemas, each with and without `isolated`.
 	it.each([
-		{ form: "batch", seance: "hidden", batch: true, structured: false, isolation: false, field: "model" },
-		{ form: "batch", seance: "hidden", batch: true, structured: true, isolation: false, field: "model" },
-		{ form: "batch", seance: "hidden", batch: true, structured: false, isolation: true, field: "model" },
-		{ form: "batch", seance: "hidden", batch: true, structured: true, isolation: true, field: "model" },
 		{ form: "batch", seance: "hidden", batch: true, structured: false, isolation: false, field: "sourceSession" },
-		{ form: "batch", seance: "advertised", batch: true, structured: false, isolation: false, field: "model" },
-		{ form: "flat", seance: "hidden", batch: false, structured: false, isolation: false, field: "model" },
+		{ form: "batch", seance: "hidden", batch: true, structured: true, isolation: false, field: "sourceSession" },
+		{ form: "batch", seance: "hidden", batch: true, structured: false, isolation: true, field: "sourceSession" },
+		{ form: "batch", seance: "hidden", batch: true, structured: true, isolation: true, field: "sourceSession" },
+		{ form: "batch", seance: "advertised", batch: true, structured: false, isolation: false, field: "sourceSession" },
+		{ form: "flat", seance: "hidden", batch: false, structured: false, isolation: false, field: "sourceSession" },
 	])(
 		"refuses $field on an ordinary agent in the $form form with seance $seance (structured: $structured, isolation: $isolation)",
 		async ({ seance, batch, structured, isolation, field }) => {

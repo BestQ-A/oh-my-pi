@@ -46,11 +46,10 @@ export interface SubagentEventPayload {
 const outputSchemaInputSchema = type("object | boolean | string | null");
 // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
 const effortRule = '"lo" | "med" | "hi"' as const;
+const modelSelectorInputSchema = type("string | string[]");
 
 // Seance-only per-spawn fields the task tool refuses for every other agent.
-// Typed against SeanceTaskSchemaFields so a field added there fails to compile
-// until it is listed here too; a missed key would be dropped on batch items.
-const SEANCE_ITEM_KEY_SET = { sourceSession: true, model: true } as const satisfies Record<SeanceItemKey, true>;
+const SEANCE_ITEM_KEY_SET = { sourceSession: true } as const;
 const SEANCE_ITEM_KEYS = Object.keys(SEANCE_ITEM_KEY_SET);
 
 /**
@@ -80,6 +79,7 @@ export const taskItemSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"model?": modelSelectorInputSchema,
 	"+": "delete",
 });
 const taskItemSchemaIsolated = type({
@@ -90,6 +90,7 @@ const taskItemSchemaIsolated = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"model?": modelSelectorInputSchema,
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -102,6 +103,7 @@ export const taskSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"model?": modelSelectorInputSchema,
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -113,6 +115,7 @@ const taskSchemaNoIsolation = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"model?": modelSelectorInputSchema,
 	"+": "delete",
 });
 function guardBatchAgent(schema: BaseType): BaseType {
@@ -165,10 +168,6 @@ export type SeanceTaskSchemaFields = {
 	"model?"?: FluentType<string | string[]>;
 };
 
-type SeanceItemKey = {
-	[K in keyof SeanceTaskSchemaFields]-?: K extends `${infer Name}?` ? Name : never;
-}[keyof SeanceTaskSchemaFields];
-
 function createTaskSchema(options: {
 	isolationEnabled: boolean;
 	batchEnabled: boolean;
@@ -197,6 +196,7 @@ function createTaskSchema(options: {
 				...effortField,
 				...schemaFields,
 				...toolsField,
+				"model?": modelSelectorInputSchema,
 				...seanceFields,
 				"isolated?": "boolean",
 				"+": "delete",
@@ -217,6 +217,7 @@ function createTaskSchema(options: {
 			...effortField,
 			...schemaFields,
 			...toolsField,
+			"model?": modelSelectorInputSchema,
 			...seanceFields,
 			"+": "delete",
 		});
@@ -237,6 +238,7 @@ function createTaskSchema(options: {
 			...effortField,
 			...schemaFields,
 			...toolsField,
+			"model?": modelSelectorInputSchema,
 			...seanceFields,
 			"isolated?": "boolean",
 			"+": "delete",
@@ -250,6 +252,7 @@ function createTaskSchema(options: {
 		...effortField,
 		...schemaFields,
 		...toolsField,
+		"model?": modelSelectorInputSchema,
 		...seanceFields,
 		"+": "delete",
 	});

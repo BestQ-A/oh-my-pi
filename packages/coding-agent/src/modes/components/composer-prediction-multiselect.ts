@@ -15,7 +15,13 @@
  * - If `0` items are checked, `Enter` submits the editor text untouched and
  *   dismisses the old candidates so unrelated prompts are never polluted.
  */
-import { type NumberedPredictionItem, padding, parseNumberedPredictionItems, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
+import {
+	type NumberedPredictionItem,
+	padding,
+	parseNumberedPredictionItems,
+	truncateToWidth,
+	visibleWidth,
+} from "@oh-my-pi/pi-tui";
 import { formatActionMarker } from "@oh-my-pi/pi-tui/render/extension-links";
 import { type ThemeColor, theme } from "@oh-my-pi/pi-tui/theme";
 
@@ -45,7 +51,10 @@ function bold(text: string): string {
 }
 
 function sanitizeLine(text: string): string {
-	return text.replace(/[\r\n\t]+/g, " ").replace(/\s{2,}/g, " ").trim();
+	return text
+		.replace(/[\r\n\t]+/g, " ")
+		.replace(/\s{2,}/g, " ")
+		.trim();
 }
 
 function parseCandidateItems(raw: string | undefined): NumberedPredictionItem[] {
@@ -54,7 +63,9 @@ function parseCandidateItems(raw: string | undefined): NumberedPredictionItem[] 
 	if (!trimmed) return [];
 	const numbered = parseNumberedPredictionItems(trimmed);
 	if (numbered && numbered.length > 0) {
-		return numbered.map(item => ({ index: item.index, text: sanitizeLine(item.text) })).filter(it => it.text.length > 0);
+		return numbered
+			.map(item => ({ index: item.index, text: sanitizeLine(item.text) }))
+			.filter(it => it.text.length > 0);
 	}
 	const single = sanitizeLine(trimmed);
 	return single.length > 0 ? [{ index: 1, text: single }] : [];
@@ -290,8 +301,7 @@ export class ComposerPredictionMultiSelect {
 			const prefixPlain = `${isChecked ? "☑" : "☐"} ${item.index}. `;
 			const prefixCols = visibleWidth(prefixPlain);
 			const bodyBudget = Math.max(6, maxSingleItemCols - prefixCols);
-			const cleanText =
-				visibleWidth(item.text) > bodyBudget ? truncateToWidth(item.text, bodyBudget) : item.text;
+			const cleanText = visibleWidth(item.text) > bodyBudget ? truncateToWidth(item.text, bodyBudget) : item.text;
 			const pillText = isChecked
 				? `${bold(fg("success", `☑ ${item.index}.`))} ${fg("text", cleanText)}`
 				: `${fg("muted", `☐ ${item.index}.`)} ${fg("muted", cleanText)}`;

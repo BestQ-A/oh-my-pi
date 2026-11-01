@@ -158,7 +158,7 @@ describe("task schema seance fields", () => {
 				const schema = getTaskSchema({ batchEnabled, isolationEnabled });
 				const wireSchema = JSON.stringify(schema.toJsonSchema());
 				expect(wireSchema).not.toContain('"sourceSession"');
-				expect(wireSchema).not.toContain('"model"');
+				expect(wireSchema).toContain('"model"');
 			}
 		}
 	});
@@ -207,7 +207,7 @@ Custom prompt.`,
 		const planSchema = JSON.stringify(planMode.parameters.toJsonSchema());
 		expect(planSchema).not.toContain('"sourceSession"');
 		expect(planSchema).not.toContain("seance");
-		expect(planSchema).not.toContain('"model"');
+		expect(planSchema).toContain('"model"');
 		expect(planMode.description).not.toContain("seance");
 		expect(planMode.description).not.toContain("Historical consults");
 
@@ -244,19 +244,21 @@ describe("task spawn validation", () => {
 		const text = await executeText({ agent: "scout" });
 		expect(text).toContain("Missing `task`");
 	});
-	it("rejects a model override for an ordinary task after the enabled schema accepts it", async () => {
+	it("accepts a per-spawn model override on an ordinary subagent and rejects sourceSession outside seance", async () => {
 		const schema = getTaskSchema({
 			isolationEnabled: false,
 			batchEnabled: false,
 			seanceFields: seanceTaskSchemaFields,
 		});
-		const params = {
+		const withSource = {
 			agent: "scout",
 			task: "Map the auth module.",
 			solutionSpace: "focused inspection",
-			model: "anthropic/claude-sonnet-4-5",
+			sourceSession: "some-session-id",
 		};
-		expect(schema(params) instanceof type.errors).toBe(false);
-		expect(await executeText(params, [bundledSeance])).toContain("`model` is only accepted for the `seance` agent.");
+		expect(schema(withSource) instanceof type.errors).toBe(false);
+		expect(await executeText(withSource, [bundledSeance])).toContain(
+			"`sourceSession` is only accepted for the `seance` agent.",
+		);
 	});
 });

@@ -3383,7 +3383,7 @@ export class TurnRecovery {
 	 *
 	 * @returns true if retry was initiated, false if no failed turn to retry or agent is busy
 	 */
-	async retry(): Promise<boolean> {
+	async retry(options?: { turnRecords?: AgentMessage[] }): Promise<boolean> {
 		if (this.#host.isStreaming() || this.#host.isCompacting() || this.isRetrying) return false;
 
 		const messages = this.#host.agent.state.messages;
@@ -3417,7 +3417,11 @@ export class TurnRecovery {
 		this.#retryAttempt = 0;
 
 		// Re-attempt the turn
-		this.#host.scheduleAgentContinue({ source: "manual-retry", delayMs: 1 });
+		this.#host.scheduleAgentContinue({
+			source: "manual-retry",
+			delayMs: 1,
+			...(options?.turnRecords ? { turnRecords: options.turnRecords } : {}),
+		});
 
 		return true;
 	}
@@ -3441,6 +3445,17 @@ export class TurnRecovery {
 			this.#host.agent.replaceMessages([...messages.slice(0, tail), ...messages.slice(end)]);
 		}
 		return prompt;
+	}
+	/**
+	 * True when the active conversation ends on a non-assistant message (e.g. a user
+	 * prompt, developer directive, or tool result whose LLM response was aborted
+	 * before `message_start` or stripped during retry backoff).
+	 */
+	hasUnansweredConversationTail(): boolean {
+		const messages = this.#host.agent.state.messages;
+		const end = conversationEnd(messages);
+		if (end === 0) return false;
+		return messages[end - 1]?.role !== "assistant";
 	}
 	/**
 	 * Strip the failed tool batch (and any aborted boundary) for a tool replay:

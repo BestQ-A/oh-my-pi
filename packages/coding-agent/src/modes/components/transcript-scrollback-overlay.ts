@@ -77,8 +77,7 @@ export class TranscriptScrollbackOverlay implements Component {
 	#refreshSnapshotIfNeeded(contentWidth: number): void {
 		const widthChanged = contentWidth !== this.#lastWidth;
 		const now = Date.now();
-		const shouldRefreshStream =
-			this.#options.isStreaming() && now - this.#lastSnapAt >= STREAM_REFRESH_INTERVAL_MS;
+		const shouldRefreshStream = this.#options.isStreaming() && now - this.#lastSnapAt >= STREAM_REFRESH_INTERVAL_MS;
 		if (!widthChanged && !shouldRefreshStream) return;
 
 		const prevOffset = this.#scrollView.getScrollOffset();
@@ -110,7 +109,12 @@ export class TranscriptScrollbackOverlay implements Component {
 			return;
 		}
 
-		if (matchesKey(data, "escape") || matchesKey(data, "q") || matchesKey(data, "return") || matchesKey(data, "end")) {
+		if (
+			matchesKey(data, "escape") ||
+			matchesKey(data, "q") ||
+			matchesKey(data, "return") ||
+			matchesKey(data, "end")
+		) {
 			this.#close();
 			return;
 		}
@@ -197,8 +201,7 @@ export class TranscriptScrollbackOverlay implements Component {
 		const closeBtnWidth = visibleWidth(closeBtnRaw);
 
 		const leftBudget = Math.max(1, safeWidth - closeBtnWidth - 2);
-		const leftFitted =
-			visibleWidth(leftInfo) > leftBudget ? truncateToWidth(leftInfo, leftBudget) : leftInfo;
+		const leftFitted = visibleWidth(leftInfo) > leftBudget ? truncateToWidth(leftInfo, leftBudget) : leftInfo;
 		const gapCols = Math.max(1, safeWidth - visibleWidth(leftFitted) - closeBtnWidth);
 		const closeBtnMarked = formatActionMarker(closeBtnRaw, "omp-scroll:close", "scrollback:close");
 		const footer =

@@ -126,9 +126,9 @@ describe("normalizeInlineCompletionSuffix", () => {
 		expect(normalizeInlineCompletionSuffix("bun test packages/", "bun test packages/coding-agent")).toBe(
 			"coding-agent",
 		);
-		expect(
-			normalizeInlineCompletionSuffix("wire composer-", "composer-inline-completion-controller"),
-		).toBe("inline-completion-controller");
+		expect(normalizeInlineCompletionSuffix("wire composer-", "composer-inline-completion-controller")).toBe(
+			"inline-completion-controller",
+		);
 		expect(normalizeInlineCompletionSuffix("cal", "l the helper")).toBe("l the helper");
 		expect(normalizeInlineCompletionSuffix("git commit", " -m 'wire inline ghost'\nsecond line")).toBe(
 			" -m 'wire inline ghost'",
@@ -187,9 +187,7 @@ describe("ComposerInlineCompletionController", () => {
 				cwd: tempDir,
 				messages: [
 					makeMessage("user", "请帮我检查内联幽灵补全状态并启用 --disallow-code-generation"),
-					makeMessage("assistant", [
-						{ type: "text", text: "Updated ComposerInlineCompletionController wiring." },
-					]),
+					makeMessage("assistant", [{ type: "text", text: "Updated ComposerInlineCompletionController wiring." }]),
 				],
 			});
 			expect(active.queryLine("pass --disallow-")).toBe("code-generation");

@@ -16,7 +16,11 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
 import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
-import { extensionLinkLabels, setExtensionLinks, stripExtensionLinkMarkers } from "@oh-my-pi/pi-tui/render/extension-links";
+import {
+	extensionLinkLabels,
+	setExtensionLinks,
+	stripExtensionLinkMarkers,
+} from "@oh-my-pi/pi-tui/render/extension-links";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
@@ -95,9 +99,9 @@ describe("ComposerPredictionMultiSelect", () => {
 
 	it("formats single and multi-item submissions cleanly with and without additional prompt text", () => {
 		expect(formatMultiSelectPromptSubmission([{ index: 2, text: "检查 oxlint 报错" }], "")).toBe("检查 oxlint 报错");
-		expect(
-			formatMultiSelectPromptSubmission([{ index: 2, text: "检查 oxlint 报错" }], "只检查 packages/tui"),
-		).toBe("检查 oxlint 报错\n\n附加提示信息：只检查 packages/tui");
+		expect(formatMultiSelectPromptSubmission([{ index: 2, text: "检查 oxlint 报错" }], "只检查 packages/tui")).toBe(
+			"检查 oxlint 报错\n\n附加提示信息：只检查 packages/tui",
+		);
 		expect(
 			formatMultiSelectPromptSubmission(
 				[

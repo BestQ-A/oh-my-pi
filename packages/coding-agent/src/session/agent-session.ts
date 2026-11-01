@@ -317,6 +317,8 @@ import type {
 	SessionOAuthAccountList,
 	SessionStats,
 	SteerOptions,
+	SwitchModelAndContinueOptions,
+	SwitchModelAndContinueResult,
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
 import { writeArtifact } from "./artifacts";
@@ -772,6 +774,8 @@ type TurnObservation = {
 	turnEnded: boolean;
 	closed: boolean;
 	turnError: unknown;
+	/** Preserved across an atomic mid-flight model switch handoff so the resumed turn closes it instead of the aborted old turn. */
+	handedOffToModelSwitch?: boolean;
 };
 
 type ActiveAgentContinue = {
@@ -1251,6 +1255,14 @@ export class AgentSession implements SettingsScope {
 	#abortInProgress = false;
 	/** In-flight {@link abort} calls; each settles after scheduling its stranded-queue drain, which {@link waitForIdle} must observe. */
 	#abortUnwinds = new Set<Promise<void>>();
+	/** Nesting depth of active {@link switchModelAndContinue} mid-flight handoffs. */
+	#modelSwitchHandoffDepth = 0;
+	/** Monotonic counter incremented on every {@link switchModelAndContinue} mid-flight handoff. */
+	#modelSwitchHandoffEpoch = 0;
+	/** Open wake-turn observation preserved across an atomic mid-flight model switch handoff. */
+	#pendingModelSwitchObservation: TurnObservation | undefined;
+	/** Tool calls currently between `#beforeToolCall` and `#afterToolCall` (accurate even before `tool_execution_start` microtask drains). */
+	#activeLocalToolCallIds = new Set<string>();
 	/** Submissions accepted by prompt()/promptCustomMessage()/sendCustomMessage() that have not
 	 *  yet dispatched a turn, queued, or bailed. Preprocessing (manual-compaction wait, slash
 	 *  commands, image normalization, vision description) runs before #promptInFlightCount is
@@ -1751,6 +1763,7 @@ export class AgentSession implements SettingsScope {
 	 */
 	async #finishTurnObservation(observation: TurnObservation | undefined, turnError: unknown): Promise<void> {
 		if (!observation) return;
+		if (observation.handedOffToModelSwitch) return;
 		observation.turnEnded = true;
 		observation.turnError = turnError;
 		try {
@@ -4667,6 +4680,7 @@ export class AgentSession implements SettingsScope {
 			void this.#settleOwnedBrowserTabs();
 		}
 		if (event.type === "tool_execution_end") {
+			this.#activeLocalToolCallIds.delete(event.toolCallId);
 			if (event.toolName === "goal") {
 				await this.#goalRuntime.onGoalToolCompleted();
 			} else {
@@ -5425,11 +5439,18 @@ export class AgentSession implements SettingsScope {
 				const inFlightEpoch = this.#beginInFlight();
 				const coalescedSources = new Set([options.source]);
 				let observation: TurnObservation | undefined;
-				const onStart = this.#ircWakeTurnObserver
+				const adoptedObservation = this.#pendingModelSwitchObservation;
+				this.#pendingModelSwitchObservation = undefined;
+				const onStart = adoptedObservation
 					? () => {
-							observation = this.#startTurnObservation(options.turnRecords ?? []);
+							adoptedObservation.handedOffToModelSwitch = false;
+							observation = adoptedObservation;
 						}
-					: undefined;
+					: this.#ircWakeTurnObserver
+						? () => {
+								observation = this.#startTurnObservation(options.turnRecords ?? []);
+							}
+						: undefined;
 				const promise = this.#runAgentContinue(signal, request, coalescedSources, onStart);
 				const attempt: ActiveAgentContinue = {
 					schedulerToken: request.schedulerToken,
@@ -5459,7 +5480,16 @@ export class AgentSession implements SettingsScope {
 			{
 				delayMs: options.delayMs,
 				generation: options.generation,
-				onSkip: reason => this.#skipAgentContinue(reason, request),
+				// handled in combined onSkip above
+				onSkip: reason => {
+					const orphan = this.#pendingModelSwitchObservation;
+					if (orphan) {
+						this.#pendingModelSwitchObservation = undefined;
+						orphan.handedOffToModelSwitch = false;
+						void this.#finishTurnObservation(orphan, undefined);
+					}
+					this.#skipAgentContinue(reason, request);
+				},
 			},
 		);
 	}
@@ -5585,6 +5615,7 @@ export class AgentSession implements SettingsScope {
 	}
 
 	#afterToolCall(ctx: AfterToolCallContext): AfterToolCallResult | undefined {
+		this.#activeLocalToolCallIds.delete(ctx.toolCall.id);
 		if (
 			this.#isTerminalYieldToolResult({
 				toolName: ctx.toolCall.name,
@@ -5615,9 +5646,13 @@ export class AgentSession implements SettingsScope {
 		const ttsrResult = await this.#ttsr.beforeToolCall(ctx);
 		if (ttsrResult) {
 			runner?.clearLoopToolCall?.(ctx.toolCall.id, ctx.tool.name);
+			if (!ttsrResult.block) this.#activeLocalToolCallIds.add(ctx.toolCall.id);
 			return ttsrResult;
 		}
-		if (!runner?.hasHandlers("tool_call")) return undefined;
+		if (!runner?.hasHandlers("tool_call")) {
+			this.#activeLocalToolCallIds.add(ctx.toolCall.id);
+			return undefined;
+		}
 		const metadata = ctx.toolCall.providerMetadata;
 		const computer = metadata?.type === "computer" ? metadata : undefined;
 		// Parity with the wrapper's pre-emit short-circuit: an already-denied
@@ -5654,6 +5689,7 @@ export class AgentSession implements SettingsScope {
 		}
 		// A computer call's event input is a synthetic {actions, pendingSafetyChecks}
 		// view, not the execution params — a revision cannot map back onto them.
+		this.#activeLocalToolCallIds.add(ctx.toolCall.id);
 		const args = callResult?.input !== undefined && !computer ? callResult.input : undefined;
 		const additionalContext = callResult?.additionalContext;
 		if (args === undefined && additionalContext === undefined) return undefined;
@@ -11293,6 +11329,7 @@ export class AgentSession implements SettingsScope {
 			// block runs, but nested prompt setup/finalizers may still be unwinding. Without this,
 			// a subsequent prompt() can incorrectly observe the session as busy after an abort.
 			this.#resetInFlight();
+			this.#activeLocalToolCallIds.clear();
 			this.#resetSessionStopContinuationState();
 			this.#clearPendingSessionStopContinuations();
 			// Safety net: if the agent loop aborted without producing an assistant
@@ -11665,6 +11702,130 @@ export class AgentSession implements SettingsScope {
 		options?: { ephemeral?: boolean },
 	): Promise<void> {
 		return this.#models.setModelTemporary(model, thinkingLevel, options);
+	}
+
+	/** Whether an atomic mid-flight model switch handoff is currently aborting/restarting the active turn. */
+	get isModelSwitchHandoffInProgress(): boolean {
+		return this.#modelSwitchHandoffDepth > 0;
+	}
+
+	/** Monotonic epoch incremented each time {@link switchModelAndContinue} interrupts an in-flight turn. */
+	get modelSwitchHandoffEpoch(): number {
+		return this.#modelSwitchHandoffEpoch;
+	}
+
+	/**
+	 * Atomically switch this session's model and continue without losing progress:
+	 * - Active local tool call(s) (`pendingToolCalls.size > 0`): leaves tools running
+	 *   (unless `interruptTools` is set) so their result feeds directly into `model`
+	 *   on the next step.
+	 * - Active LLM stream or retry backoff: holds an `#abortUnwinds` barrier across
+	 *   internal abort -> `setModelTemporary` -> `retry()` / `continue()` so callers
+	 *   awaiting `waitForIdle()` (such as subagent `driveSessionToResult`) stay parked
+	 *   through the handoff and finish seamlessly on `model`.
+	 * - Idle with an interrupted/failed/aborted/unanswered tail: switches to `model`
+	 *   and immediately retries/continues that unfinished turn.
+	 */
+	async switchModelAndContinue(
+		model: Model,
+		options?: SwitchModelAndContinueOptions,
+	): Promise<SwitchModelAndContinueResult> {
+		const previousModel = this.model ? `${this.model.provider}/${this.model.id}` : undefined;
+		const hasActiveTools = this.#activeLocalToolCallIds.size > 0 || this.agent.state.pendingToolCalls.size > 0;
+		const inFlightLlmOrRetry = (this.isStreaming && !hasActiveTools) || this.isRetrying;
+		const shouldInterrupt =
+			(inFlightLlmOrRetry && options?.interruptInFlightLlm !== false) ||
+			(this.isStreaming && hasActiveTools && options?.interruptTools === true);
+
+		if (this.isStreaming && hasActiveTools && !shouldInterrupt) {
+			await this.setModelTemporary(model, options?.thinkingLevel);
+			const nextSelector = this.model ? `${this.model.provider}/${this.model.id}` : `${model.provider}/${model.id}`;
+			return {
+				previousModel,
+				model: nextSelector,
+				thinkingLevel: this.configuredThinkingLevel(),
+				interruptedLlm: false,
+				deferredAfterActiveTools: true,
+				resumed: true,
+			};
+		}
+
+		if (shouldInterrupt) {
+			const handoffUnwind = Promise.withResolvers<void>();
+			this.#abortUnwinds.add(handoffUnwind.promise);
+			this.#modelSwitchHandoffDepth++;
+			this.#modelSwitchHandoffEpoch++;
+			const openObs = this.#openTurnObservation;
+			if (openObs && !openObs.closed && !openObs.turnEnded) {
+				openObs.handedOffToModelSwitch = true;
+				this.#pendingModelSwitchObservation = openObs;
+			}
+			let resumed = false;
+			try {
+				await this.abort({
+					goalReason: "internal",
+					reason: `Model switched mid-flight to ${model.provider}/${model.id}`,
+				});
+				await this.setModelTemporary(model, options?.thinkingLevel);
+				resumed = await this.retry();
+				if (!resumed && (this.#recovery.hasUnansweredConversationTail() || this.agent.hasQueuedMessages())) {
+					this.#scheduleAgentContinue({ source: "manual-retry", delayMs: 1 });
+					resumed = true;
+				}
+				const nextSelector = this.model
+					? `${this.model.provider}/${this.model.id}`
+					: `${model.provider}/${model.id}`;
+				return {
+					previousModel,
+					model: nextSelector,
+					thinkingLevel: this.configuredThinkingLevel(),
+					interruptedLlm: true,
+					deferredAfterActiveTools: false,
+					resumed,
+				};
+			} finally {
+				if (!resumed && this.#pendingModelSwitchObservation) {
+					const unresumed = this.#pendingModelSwitchObservation;
+					this.#pendingModelSwitchObservation = undefined;
+					unresumed.handedOffToModelSwitch = false;
+					void this.#finishTurnObservation(unresumed, undefined);
+				}
+				this.#modelSwitchHandoffDepth--;
+				this.#abortUnwinds.delete(handoffUnwind.promise);
+				handoffUnwind.resolve();
+			}
+		}
+
+		await this.setModelTemporary(model, options?.thinkingLevel);
+		let resumed = false;
+		if (options?.resumeIdleInterrupted !== false && !this.isStreaming && !this.isCompacting) {
+			const wakeRecords: AgentMessage[] = [
+				{
+					role: "developer",
+					content: `[model-switch-resume] Switched model to ${model.provider}/${model.id}`,
+					attribution: "agent",
+					userInitiated: true,
+					timestamp: Date.now(),
+				},
+			];
+			resumed = await this.restoreInterruptedTurn({ turnRecords: wakeRecords });
+			if (!resumed) {
+				resumed = await this.retry({ turnRecords: wakeRecords });
+			}
+			if (!resumed && (this.#recovery.hasUnansweredConversationTail() || this.agent.hasQueuedMessages())) {
+				this.#scheduleAgentContinue({ source: "manual-retry", delayMs: 1, turnRecords: wakeRecords });
+				resumed = true;
+			}
+		}
+		const nextSelector = this.model ? `${this.model.provider}/${this.model.id}` : `${model.provider}/${model.id}`;
+		return {
+			previousModel,
+			model: nextSelector,
+			thinkingLevel: this.configuredThinkingLevel(),
+			interruptedLlm: false,
+			deferredAfterActiveTools: false,
+			resumed,
+		};
 	}
 
 	/** Cycles the scoped model set, or all available models when no scope exists. */
@@ -12474,8 +12635,8 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/** Retry the last failed assistant turn when the session is idle. */
-	async retry(): Promise<boolean> {
-		const didRetry = await this.#recovery.retry();
+	async retry(options?: { turnRecords?: AgentMessage[] }): Promise<boolean> {
+		const didRetry = await this.#recovery.retry(options);
 		// A manual retry is the user resuming the run they interrupted, so it lifts the
 		// interrupt's auto-resume suppression the same way a typed prompt does.
 		if (didRetry) this.#advisors.autoResumeSuppressed = false;
@@ -12496,7 +12657,7 @@ export class AgentSession implements SettingsScope {
 	 * @returns whether a continuation was scheduled; false while a turn runs, without
 	 * a model, or with nothing left unfinished.
 	 */
-	async restoreInterruptedTurn(): Promise<boolean> {
+	async restoreInterruptedTurn(options?: { turnRecords?: AgentMessage[] }): Promise<boolean> {
 		const branch = this.sessionManager.getBranch();
 		if (this.isStreaming || !hasRestorableTurn(branch)) return false;
 		const model = this.model;
@@ -12511,7 +12672,7 @@ export class AgentSession implements SettingsScope {
 			this.sessionManager.appendMessage(abort);
 			this.agent.replaceMessages(this.buildDisplaySessionContext().messages);
 		}
-		return this.retry();
+		return this.retry(options);
 	}
 
 	// =========================================================================

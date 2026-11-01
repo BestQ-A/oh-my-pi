@@ -599,6 +599,8 @@ export interface InteractiveModeContext {
 	showModelSelector(options?: { temporaryOnly?: boolean; selectOnly?: SelectOnlyModelSelectorOptions }): void;
 	/** Session-only switch to an already-resolved model (`/switch <selector>`); compacts first when over context. */
 	switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void>;
+	/** Open the floating Model Picker for a specific subagent to switch its model mid-flight and continue. */
+	showSubagentModelPicker(agentId: string): void;
 	showPluginSelector(mode?: "install" | "uninstall"): void;
 	showUserMessageSelector(): void;
 	showCopySelector(): void;

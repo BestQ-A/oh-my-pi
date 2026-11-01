@@ -650,3 +650,37 @@ export interface EphemeralTurnResult {
 	replyText: string;
 	assistantMessage: AssistantMessage;
 }
+
+/** Options for {@link AgentSession.switchModelAndContinue}. */
+export interface SwitchModelAndContinueOptions {
+	thinkingLevel?: ConfiguredThinkingLevel;
+	/**
+	 * When streaming from an LLM or waiting in retry backoff (with no local tool
+	 * actively executing), abort the old model's in-flight request and immediately
+	 * resume the turn on the newly selected model. Default: `true`.
+	 */
+	interruptInFlightLlm?: boolean;
+	/**
+	 * Also abort active local tool executions (`pendingToolCalls.size > 0`) instead
+	 * of letting them complete and feed their result to the new model. Default: `false`.
+	 */
+	interruptTools?: boolean;
+	/**
+	 * When idle with an interrupted, failed, aborted, or unanswered turn tail,
+	 * immediately retry/continue on the new model. Default: `true`.
+	 */
+	resumeIdleInterrupted?: boolean;
+}
+
+/** Outcome of {@link AgentSession.switchModelAndContinue}. */
+export interface SwitchModelAndContinueResult {
+	previousModel: string | undefined;
+	model: string;
+	thinkingLevel: ConfiguredThinkingLevel | undefined;
+	/** Old model's active LLM stream or retry backoff was aborted for immediate handoff. */
+	interruptedLlm: boolean;
+	/** Active local tool call(s) were left running; next LLM turn automatically uses the new model. */
+	deferredAfterActiveTools: boolean;
+	/** Session scheduled/started a continuation turn on the new model. */
+	resumed: boolean;
+}

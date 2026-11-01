@@ -1861,6 +1861,14 @@ const streamOpenAICompletionsOnce = (
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			// Gateways fronting Claude (Magpie → Kiro) report a classifier refusal as a plain
+			// HTTP 400 carrying no `stop_details`. Surface it the way the Anthropic wire does so
+			// the session walks the fallback chain and prunes the turn from replay, instead of
+			// pinning a non-retryable content-blocked error.
+			const gatewayRefusal = result.stopReason === "error" ? GATEWAY_REFUSAL_PATTERN.exec(result.message) : null;
+			if (gatewayRefusal) {
+				output.stopDetails = { type: "refusal", category: gatewayRefusal[1], explanation: result.message };
+			}
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = readOpenRouterRawMetadata(capturedErrorResponse);
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
@@ -3023,6 +3031,9 @@ function detectRepetitionStop(choice: ChatCompletionChunk.Choice): string | unde
 	if (typeof stopReason === "string" && stopReason.length > 0) parts.push(`stop_reason=${stopReason}`);
 	return parts.join(" ") || "repetition";
 }
+
+/** `<model> refused this request (safety filter: <category>) via <backend>` — Magpie's rendering of an upstream classifier refusal. */
+const GATEWAY_REFUSAL_PATTERN = /refused this request \(safety filter: ([\w-]+)\)/i;
 
 function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | string): {
 	stopReason: StopReason;

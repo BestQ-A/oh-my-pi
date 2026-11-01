@@ -480,10 +480,7 @@ export class ComposerInlineCompletionController {
 		this.#lastDocPrefix = docPrefix;
 
 		const trimmedStart = docPrefix.trimStart();
-		if (
-			!trimmedStart ||
-			(cursorLine === 0 && (trimmedStart.startsWith("/") || trimmedStart.startsWith("!")))
-		) {
+		if (!trimmedStart || (cursorLine === 0 && (trimmedStart.startsWith("/") || trimmedStart.startsWith("!")))) {
 			if (prevPrefix !== docPrefix) this.cancel();
 			return undefined;
 		}
@@ -729,7 +726,9 @@ export class ComposerInlineCompletionController {
 
 		const sections: string[] = [...this.#buildWorkspaceSections(docPrefix, recentTurns.join(" "))];
 		if (userStyleSamples.length > 0) {
-			sections.push(`<user-voice-samples>\n${userStyleSamples.map(s => `- ${s}`).join("\n")}\n</user-voice-samples>`);
+			sections.push(
+				`<user-voice-samples>\n${userStyleSamples.map(s => `- ${s}`).join("\n")}\n</user-voice-samples>`,
+			);
 		}
 		if (recentTurns.length > 0) {
 			sections.push(`<recent-conversation>\n${recentTurns.join("\n")}\n</recent-conversation>`);
@@ -836,10 +835,16 @@ export class ComposerInlineCompletionController {
 		})();
 	}
 
-	async #tryCursorTabCompletion(docPrefix: string, currentLine: string, signal: AbortSignal): Promise<string | undefined> {
+	async #tryCursorTabCompletion(
+		docPrefix: string,
+		currentLine: string,
+		signal: AbortSignal,
+	): Promise<string | undefined> {
 		if (this.#customRunner) return undefined;
 		const cwd = this.#cwd ?? process.cwd();
-		const gitFiles = this.#getGitFiles(cwd).slice(0, 12).map(f => `${f.status} ${f.path}`);
+		const gitFiles = this.#getGitFiles(cwd)
+			.slice(0, 12)
+			.map(f => `${f.status} ${f.path}`);
 		const treePaths = scanWorkspaceTree(cwd);
 		const lowerDraft = docPrefix.toLowerCase();
 		const queryTokens = [...new Set(lowerDraft.match(/[a-z0-9_.-]{3,}/g) ?? [])].slice(-12);

@@ -1329,8 +1329,7 @@ const quotaPoolsSegment: StatusLineSegment = {
 			const pct = theme.fg(QUOTA_POOL_SEVERITY_COLORS[pool.severity], `${Math.round(pool.remainingPct)}%`);
 			const cleanReset = pool.resetText ? sanitizeStatusText(pool.resetText) : "";
 			const reset = cleanReset ? theme.fg("dim", `/${cleanReset}`) : "";
-			const credits =
-				pool.bankedResets && pool.bankedResets > 0 ? theme.fg("accent", `✦${pool.bankedResets}`) : "";
+			const credits = pool.bankedResets && pool.bankedResets > 0 ? theme.fg("accent", `✦${pool.bankedResets}`) : "";
 			capsules.push(`${label} ${pct}${reset}${credits}`);
 		}
 		if (capsules.length === 0) {

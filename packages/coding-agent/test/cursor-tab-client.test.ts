@@ -146,7 +146,7 @@ describe("Cursor Tab (StreamCpp) Connect-RPC client", () => {
 			draftPrefix: "帮我提交 git ",
 			currentLine: "帮我提交 git ",
 			overrideToken: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.mock_token_payload",
-			fetchImpl: (async () => new Response("Forbidden", { status: 403 })) as typeof fetch,
+			fetchImpl: (async () => new Response("Forbidden", { status: 403 })) as unknown as typeof fetch,
 		});
 		expect(httpFail).toBeUndefined();
 	});

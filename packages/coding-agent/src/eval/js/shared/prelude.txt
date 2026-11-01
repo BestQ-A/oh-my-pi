@@ -183,6 +183,16 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			});
 		}
 
+		async setModel(model, message) {
+			const selector = String(model ?? "").trim();
+			const content = message !== undefined && String(message).trim() ? `${selector}\n${String(message)}` : selector;
+			return await globalThis.__omp_call_tool__("write", {
+				path: `proc://${this.id}/model`,
+				content,
+				i: "Switching subagent model",
+			});
+		}
+
 		async output(opts = {}) {
 			return await output(this.id, opts);
 		}
@@ -240,6 +250,10 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 
 		async send(message) {
 			return (await this._promise).send(message);
+		}
+
+		async setModel(model, message) {
+			return (await this._promise).setModel(model, message);
 		}
 
 		async output(options) {

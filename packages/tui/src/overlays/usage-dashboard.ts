@@ -213,7 +213,8 @@ function formatWindowAbsoluteCounts(limit: UsageLimit): { left?: string; used?: 
 				: undefined;
 	if (rem === undefined || used === undefined) return {};
 	if (unit === "usd") {
-		const fmtUsd = (n: number) => `$${n >= 10 && Number.isInteger(Math.round(n * 10) / 10) ? Math.round(n) : n.toFixed(1)}`;
+		const fmtUsd = (n: number) =>
+			`$${n >= 10 && Number.isInteger(Math.round(n * 10) / 10) ? Math.round(n) : n.toFixed(1)}`;
 		return { left: `${fmtUsd(rem)}/${fmtUsd(total)}`, used: `${fmtUsd(used)}/${fmtUsd(total)}` };
 	}
 	const fmtInt = (n: number) => Math.round(n).toLocaleString("en-US");
@@ -225,8 +226,7 @@ function buildWindowsFromLimits(limits: readonly UsageLimit[], nowMs: number, ma
 	for (const limit of limits) {
 		const label = formatLimitTitle(limit);
 		const key =
-			limit.scope.sharedGroup ??
-			`${label}|${limit.window?.id ?? limit.scope.windowId ?? "default"}|${limit.id}`;
+			limit.scope.sharedGroup ?? `${label}|${limit.window?.id ?? limit.scope.windowId ?? "default"}|${limit.id}`;
 		const entry = buckets.get(key) ?? { label, limits: [] };
 		entry.limits.push(limit);
 		buckets.set(key, entry);
@@ -257,9 +257,7 @@ function buildWindowsFromLimits(limits: readonly UsageLimit[], nowMs: number, ma
 			usedText: fraction === undefined ? formatAbsoluteOnlyAmount(bucket.limits) : undefined,
 		};
 	});
-	const visible = new Set(
-		[...declared].sort((a, b) => (b.fraction ?? -1) - (a.fraction ?? -1)).slice(0, maxVisible),
-	);
+	const visible = new Set([...declared].sort((a, b) => (b.fraction ?? -1) - (a.fraction ?? -1)).slice(0, maxVisible));
 	const windows = [...declared.filter(row => visible.has(row)), ...declared.filter(row => !visible.has(row))];
 	for (const window of windows) {
 		const duplicated = windows.some(other => other !== window && other.label === window.label);
@@ -268,7 +266,12 @@ function buildWindowsFromLimits(limits: readonly UsageLimit[], nowMs: number, ma
 	return windows;
 }
 
-function extractAccountSection(report: UsageReport, index: number, totalInProvider: number, nowMs: number): AccountQuotaSection {
+function extractAccountSection(
+	report: UsageReport,
+	index: number,
+	totalInProvider: number,
+	nowMs: number,
+): AccountQuotaSection {
 	const meta = report.metadata;
 	const email = typeof meta?.email === "string" && meta.email.trim() ? meta.email.trim() : undefined;
 	const accountId = typeof meta?.accountId === "string" && meta.accountId.trim() ? meta.accountId.trim() : undefined;
@@ -278,7 +281,8 @@ function extractAccountSection(report: UsageReport, index: number, totalInProvid
 			: typeof meta?.orgName === "string" && meta.orgName.trim()
 				? meta.orgName.trim()
 				: undefined;
-	const accountLabel = email ?? (accountId ? accountId.slice(0, 12) : totalInProvider > 1 ? `Account #${index + 1}` : "");
+	const accountLabel =
+		email ?? (accountId ? accountId.slice(0, 12) : totalInProvider > 1 ? `Account #${index + 1}` : "");
 	const planLabel = planRaw && planRaw.toLowerCase() !== accountLabel.toLowerCase() ? planRaw : undefined;
 	const windows = buildWindowsFromLimits(report.limits, nowMs, CARD_MAX_WINDOWS);
 	const resetSummary = summarizeUsageResetCredits(report.resetCredits, nowMs);
@@ -895,7 +899,9 @@ export class UsageDashboardComponent implements Component {
 		this.#options = options;
 		this.#reports = options.reports;
 		this.#unavailableAccounts = options.unavailableAccounts;
-		this.#presets = options.presets ? options.presets.map(preset => ({ name: preset.name, active: preset.active })) : [];
+		this.#presets = options.presets
+			? options.presets.map(preset => ({ name: preset.name, active: preset.active }))
+			: [];
 		this.#nowMs = Date.now();
 		this.#cards = buildProviderCards(this.#reports, this.#nowMs, this.#unavailableAccounts);
 		this.#panel = new OverlayPanel("Usage");
@@ -1067,8 +1073,7 @@ export class UsageDashboardComponent implements Component {
 			const resetPlain = this.#formatWindowResetAndPace(window, includePace);
 			const resetColor = window.paceDiffPct !== undefined && window.paceDiffPct >= 10 ? "warning" : "dim";
 			const resetPad = " ".repeat(Math.max(0, resetWidth - visibleWidth(resetPlain)));
-			const resetText =
-				resetWidth > 0 ? ` ${theme.fg(resetColor, `${resetPad}${resetPlain}`)}` : "";
+			const resetText = resetWidth > 0 ? ` ${theme.fg(resetColor, `${resetPad}${resetPlain}`)}` : "";
 			const meterBar = `${this.#miniBar(shownFraction, window.status, barWidth)}${pctText}`;
 			const clickableMeter = formatActionMarker(
 				meterBar,
@@ -1161,8 +1166,8 @@ export class UsageDashboardComponent implements Component {
 				if (acctIdx > 0) {
 					lines.push(`  ${theme.fg("dim", "╌".repeat(Math.max(4, Math.min(24, width - 4))))}`);
 				}
-				const whoParts = [section.accountLabel, section.planLabel].filter(
-					(part): part is string => Boolean(part && part.trim()),
+				const whoParts = [section.accountLabel, section.planLabel].filter((part): part is string =>
+					Boolean(part && part.trim()),
 				);
 				if (section.daybreak) whoParts.push("daybreak");
 				const whoRaw = sanitizeDisplayLine(whoParts.join(" · ") || `Account #${acctIdx + 1}`);
@@ -1177,13 +1182,7 @@ export class UsageDashboardComponent implements Component {
 					continue;
 				}
 				const sliced = section.windows.slice(0, CARD_MAX_WINDOWS);
-				const { layout, labelLines } = this.#computeWindowLayout(
-					[sliced],
-					width,
-					4,
-					showPolarityWord,
-					includePace,
-				);
+				const { layout, labelLines } = this.#computeWindowLayout([sliced], width, 4, showPolarityWord, includePace);
 				lines.push(
 					...this.#renderWindowBlock(
 						section.windows,
@@ -1209,8 +1208,8 @@ export class UsageDashboardComponent implements Component {
 		// Single-account provider card
 		const singleAcct = card.accountSections[0];
 		if (singleAcct && width >= 34) {
-			const subParts = [singleAcct.accountLabel, singleAcct.planLabel].filter(
-				(p): p is string => Boolean(p && p.trim()),
+			const subParts = [singleAcct.accountLabel, singleAcct.planLabel].filter((p): p is string =>
+				Boolean(p && p.trim()),
 			);
 			if (subParts.length > 0) {
 				const subClean = sanitizeDisplayLine(subParts.join(" · "));
@@ -1293,9 +1292,7 @@ export class UsageDashboardComponent implements Component {
 					showPolarityWord,
 					includePace,
 				);
-				rowCards = cards.map((card, index) =>
-					this.#renderCardLines(card, cardWidth, labelLines[index]!, layout),
-				);
+				rowCards = cards.map((card, index) => this.#renderCardLines(card, cardWidth, labelLines[index]!, layout));
 			} else {
 				rowCards = cards.map(card => this.#renderCardLines(card, cardWidth));
 			}

@@ -4,6 +4,7 @@ import { isFactoryDroidModel } from "../providers/factory-droid";
 import { generateFactoryDroidImage } from "./factory-droid";
 import { generateAntigravityImage } from "./google-antigravity";
 import { generateGoogleImage } from "./google-generative-ai";
+import { generateMiniMaxImage, isMiniMaxImageModel } from "./minimax-images";
 import { generateOpenAIImage } from "./openai-images";
 import { generateHostedImage } from "./openai-hosted";
 import { generateOpenRouterImage } from "./openrouter-images";
@@ -12,6 +13,7 @@ import type { ImageGenerationOptions, ImageGenerationRequest, ImageGenerationRes
 export * from "./factory-droid";
 export * from "./google-antigravity";
 export * from "./google-generative-ai";
+export * from "./minimax-images";
 export * from "./openai-hosted";
 export * from "./openai-images";
 export * from "./openrouter-images";
@@ -31,6 +33,7 @@ export async function generateImage(
 	options: ImageGenerationOptions,
 ): Promise<ImageGenerationResult> {
 	if (isFactoryDroidModel(model)) return generateFactoryDroidImage(model, request, options);
+	if (isMiniMaxImageModel(model)) return generateMiniMaxImage(model, request, options);
 	switch (model.api) {
 		case "openai-images":
 			return generateOpenAIImage(model, request, options);

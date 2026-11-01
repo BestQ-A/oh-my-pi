@@ -985,7 +985,9 @@ export class CommandController {
 				const count = fresh?.length ?? 0;
 				this.ctx.showStatus(`Refreshed quota pools (${count} account report${count === 1 ? "" : "s"}).`);
 			} catch (error) {
-				this.ctx.showError(`Failed to refresh quota data: ${error instanceof Error ? error.message : String(error)}`);
+				this.ctx.showError(
+					`Failed to refresh quota data: ${error instanceof Error ? error.message : String(error)}`,
+				);
 			}
 			return;
 		}
