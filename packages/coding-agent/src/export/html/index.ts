@@ -17,6 +17,13 @@ export { type ExportThemeNames, parseExportArgs } from "./args";
 
 let cachedTemplate: string | undefined;
 
+function inlineViewerScript(viewer: string): string {
+	// Inline classic scripts run before deferred external scripts. Wait for
+	// both shared libraries, and prevent embedded text from closing the tag.
+	const escaped = viewer.replace(/<\/script/gi, match => `<\\/${match.slice(2)}`);
+	return `<script>window.addEventListener("DOMContentLoaded",function(){\n${escaped}\n});</script>`;
+}
+
 /** Create an export document with a checkout viewer or an integrity-pinned release viewer. */
 export function getTemplate(): string {
 	if (cachedTemplate) return cachedTemplate;
@@ -25,8 +32,11 @@ export function getTemplate(): string {
 		!process.env.PI_BUNDLED &&
 		!import.meta.dir.split(/[\\/]/).includes("node_modules") &&
 		fs.existsSync(path.join(import.meta.dir, "shell.html"));
+	const embeddedViewer = process.env.PI_EXPORT_VIEWER_EMBED;
 	let viewerScript: string;
-	if (sourceCheckout) {
+	if (embeddedViewer) {
+		viewerScript = inlineViewerScript(embeddedViewer);
+	} else if (sourceCheckout) {
 		const viewerPath = path.resolve(import.meta.dir, "../../../export-assets", viewerAsset.file);
 		let viewer: string;
 		try {
@@ -39,10 +49,7 @@ export function getTemplate(): string {
 			}
 			throw err;
 		}
-		// Inline classic scripts run before deferred external scripts. Wait for
-		// both shared libraries, and prevent embedded text from closing the tag.
-		const escaped = viewer.replace(/<\/script/gi, match => `<\\/${match.slice(2)}`);
-		viewerScript = `<script>window.addEventListener("DOMContentLoaded",function(){\n${escaped}\n});</script>`;
+		viewerScript = inlineViewerScript(viewer);
 	} else {
 		const viewerUrl = `https://build.stencil.so/web/omp/${encodeURIComponent(VERSION)}/${viewerAsset.file}`;
 		viewerScript = `<script defer src="${viewerUrl}" integrity="${viewerAsset.integrity}" crossorigin="anonymous" onerror="document.getElementById('viewer-status').textContent='Could not load the session viewer. Connect to the internet and reload this file.'"></script>`;
