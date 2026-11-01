@@ -23,7 +23,7 @@ import {
 	createCachedComponent,
 	type ConfiguredThinkingLevel,
 } from "../render/render-utils";
-import type { StructuredSubagentOutput } from "./task";
+import type { StructuredSubagentOutput, SubagentHealth } from "./task";
 import { describeJobTiles, type JobTile, type JobWidgetView, renderJobTileLines } from "./job-widget";
 import type { RenderResultOptions, ToolRenderer, ToolActivitySummary } from "./renderer";
 import type { IrcDeliveryReceipt, IrcMessage } from "./irc";
@@ -74,6 +74,8 @@ export interface JobSnapshot {
 	contextTokens?: number;
 	/** Running task only: the model's context window; see `AgentProgress.contextWindow`. */
 	contextWindow?: number;
+	/** Running task only: derived run health when not `working` (`retrying`, `rate_limited`, `stalled`). */
+	derivedHealth?: SubagentHealth;
 	/** The job's live widget, while one is being drawn; frozen at its last state once the job settles. */
 	widget?: JobWidgetView;
 	resultText?: string;
