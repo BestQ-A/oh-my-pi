@@ -97,7 +97,7 @@ import { resolveTernPane } from "../../tools/browser/tern/kind";
 import { TernError, type TernErrorKind, TernSocketClient } from "../../tools/browser/tern/wire";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
-import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
+import { replaceTabs, shortenEmbeddedPaths, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
 	getChangelogPath,
 	parseChangelog,
@@ -861,6 +861,7 @@ export class CommandController {
 	 */
 	async handleJobsCommand(options?: { full?: boolean }): Promise<void> {
 		const full = options?.full === true;
+		if (full) this.ctx.viewSession.requestJobCaptions();
 		const tree = this.ctx.viewSession.getAsyncJobTree();
 		if (!tree) {
 			this.ctx.showWarning("Async background jobs are unavailable in this session.");
@@ -894,7 +895,8 @@ export class CommandController {
 			// A spawned subagent's task job takes the agent's id as its id and label: name it once.
 			const agent = row.agent && row.agent.id !== job.id ? ` ${theme.bold(row.agent.id)}` : "";
 			info += `${guide}${renderJobLine(job, now)}${agent}\n`;
-			const text = full ? (job.command ?? job.label) : job.label;
+			// What the job is for leads; full mode follows it with what the command does and the whole command.
+			const text = full ? (job.command ?? job.label) : (job.intent ?? job.label);
 			if (text === job.id) continue;
 			const indent = jobTreeIndent(row, theme);
 			const prefix = theme.fg("dim", indent);
@@ -904,7 +906,7 @@ export class CommandController {
 				continue;
 			}
 			for (const line of wrapTextWithAnsi(
-				replaceTabs(sanitizeText(text)),
+				shortenEmbeddedPaths(replaceTabs(sanitizeText([job.intent, job.caption, text].filter(Boolean).join("\n")))),
 				Math.max(1, columns - 4 - visibleWidth(indent)),
 			)) {
 				info += `${prefix}${theme.fg("dim", line)}\n`;
@@ -2010,7 +2012,7 @@ export class CommandController {
 		let finished = false;
 
 		if (isDeferred) {
-			this.ctx.pendingMessagesContainer.addChild(this.ctx.bashComponent);
+			this.ctx.pendingShellContainer.addChild(this.ctx.bashComponent);
 			this.ctx.pendingBashComponents.push(this.ctx.bashComponent);
 		} else {
 			this.ctx.present(this.ctx.bashComponent);
@@ -2121,7 +2123,7 @@ export class CommandController {
 		this.ctx.pythonComponent = new EvalExecutionComponent(code, this.ctx.ui, excludeFromContext);
 
 		if (isDeferred) {
-			this.ctx.pendingMessagesContainer.addChild(this.ctx.pythonComponent);
+			this.ctx.pendingShellContainer.addChild(this.ctx.pythonComponent);
 			this.ctx.pendingPythonComponents.push(this.ctx.pythonComponent);
 		} else {
 			this.ctx.present(this.ctx.pythonComponent);

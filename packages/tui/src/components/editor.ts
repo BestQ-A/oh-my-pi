@@ -1030,6 +1030,11 @@ export class Editor implements Component, Focusable {
 	/** Lifecycle callback invoked when a shown {@link inlineCompletion} is accepted, partially accepted,
 	 *  or explicitly dismissed. */
 	onInlineCompletionEvent?: (event: "accept" | "partial-accept" | "dismiss", text?: string) => void;
+	/** Called after Tab or Right inserts the rest of the shown {@link prediction}. */
+	onPredictionAccepted?: () => void;
+	/** Called for each frame that paints {@link prediction} as ghost text: a terminal frame that draws at
+	 *  least one cell of it, or a native frame that carries it as the editor's ghost. */
+	onPredictionShown?: () => void;
 
 	// Custom top border (for status line integration). Either an eager `content`
 	// (set once, reused every frame) or a `provider` that recomputes lazily just
@@ -1707,6 +1712,10 @@ export class Editor implements Component, Focusable {
 		// against the cursor, or the placeholder flush right.
 		const placeholder = this.#getPlaceholder();
 		const inlineHint = placeholder ? null : this.#getInlineHint();
+		// Whether the hint is the prediction, and how many of its cells this frame draws: a full row,
+		// an unfocused hardware-cursor row, or the IME-safe layout can leave it unpainted.
+		const hintIsPrediction = inlineHint !== null && inlineHint === this.#getPredictionSuffix();
+		let hintCellsPainted = 0;
 		const hintStyle = this.#theme.hintStyle ?? ((t: string) => `\x1b[2m${t}\x1b[0m`);
 		const hintTail = (avail: number): { text: string; width: number } | undefined => {
 			if (placeholder) {
@@ -1856,6 +1865,7 @@ export class Editor implements Component, Focusable {
 					} else if (tail) {
 						displayText = before + marker + tail.text;
 						displayWidth += tail.width;
+						hintCellsPainted += tail.width;
 					} else if (after.length === 0 && !isSideBordered && displayWidth >= lineContentWidth) {
 						displayText = this.#renderTerminalCursorMarker(before, marker, lineContentWidth);
 					} else {
@@ -1902,6 +1912,7 @@ export class Editor implements Component, Focusable {
 						const tail = hintTail(Math.max(0, lineContentWidth - displayWidth - overrideWidth));
 						displayText = before + marker + this.cursorOverride + (tail?.text ?? "");
 						displayWidth += overrideWidth + (tail?.width ?? 0);
+						hintCellsPainted += tail?.width ?? 0;
 					}
 				} else {
 					// Cursor is at the end - add thin cursor glyph
@@ -1916,6 +1927,7 @@ export class Editor implements Component, Focusable {
 						const tail = hintTail(Math.max(0, lineContentWidth - displayWidth - cursorWidth));
 						displayText = before + marker + cursor + (tail?.text ?? "");
 						displayWidth += cursorWidth + (tail?.width ?? 0);
+						hintCellsPainted += tail?.width ?? 0;
 					}
 					if (displayWidth > lineContentWidth && paddingX > 0) {
 						cursorPaddingOverflow = displayWidth - lineContentWidth;
@@ -1958,6 +1970,7 @@ export class Editor implements Component, Focusable {
 				}),
 			);
 		}
+		if (hintIsPrediction && hintCellsPainted > 0) this.onPredictionShown?.();
 
 		const bottomRow = style.renderBottom(chromeCtx);
 		if (bottomRow !== undefined) result.push(bottomRow);
@@ -2023,6 +2036,7 @@ export class Editor implements Component, Focusable {
 				: placeholder && plainText(placeholder).trim();
 		const atLineEnd = cursorCol >= (lines[cursorLine]?.length ?? 0);
 		const ghost = nativePlaceholder || !atLineEnd ? null : this.#getInlineHint();
+		if (ghost && ghost === this.#getPredictionSuffix()) this.onPredictionShown?.();
 		const vim = this.#vim;
 		let anchor: number | null = null;
 		if (vim?.visual && vim.anchor !== null) {
@@ -5306,6 +5320,7 @@ export class Editor implements Component, Focusable {
 		if (!suffix) return false;
 		this.onInlineCompletionEvent?.("accept", suffix);
 		this.#insertTextAtCursor(suffix);
+		this.onPredictionAccepted?.();
 		return true;
 	}
 	/** Accept one chunk of the active ghost prediction, inline completion, or word completion. */

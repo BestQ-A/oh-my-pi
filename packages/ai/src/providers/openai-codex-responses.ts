@@ -15,6 +15,7 @@ import {
 	$env,
 	$flag,
 	asRecord,
+	toError,
 	cloneJsonTree,
 	fetchWithRetry,
 	getInstallId,
@@ -1382,7 +1383,7 @@ function createCodexRequestContext(
 	}
 
 	const accountId = getCodexAccountId(apiKey);
-	applyCodexAccessPrograms(transformedBody, model, accountId);
+	applyCodexAccessPrograms(transformedBody, model, accountId, options?.codexAccessPrograms);
 	const baseUrl = model.baseUrl || CODEX_BASE_URL;
 	const url = resolveCodexResponsesUrl(baseUrl);
 
@@ -3084,7 +3085,7 @@ class CodexStreamProcessor {
 			await this.#reopenSseStream(state);
 			return true;
 		}
-		const streamError = error instanceof Error ? error : new Error(String(error));
+		const streamError = toError(error);
 		const replayingBufferedOutputOverSse = this.output.content.length > 0;
 		const fatalWebSocketMessage = streamError.message.toLowerCase();
 		const isFatal = CODEX_WEBSOCKET_FATAL_PATTERNS.some(pattern =>
