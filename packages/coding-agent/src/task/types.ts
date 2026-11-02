@@ -203,7 +203,6 @@ function createTaskSchema(options: {
 				...effortField,
 				...schemaFields,
 				...toolsField,
-				"model?": "string",
 				...seanceFields,
 				"isolated?": "boolean",
 				"+": "delete",
@@ -224,7 +223,6 @@ function createTaskSchema(options: {
 			...effortField,
 			...schemaFields,
 			...toolsField,
-			"model?": "string",
 			...seanceFields,
 			"+": "delete",
 		});
@@ -245,7 +243,6 @@ function createTaskSchema(options: {
 			...effortField,
 			...schemaFields,
 			...toolsField,
-			"model?": "string",
 			...seanceFields,
 			"isolated?": "boolean",
 			"+": "delete",
@@ -259,7 +256,6 @@ function createTaskSchema(options: {
 		...effortField,
 		...schemaFields,
 		...toolsField,
-		"model?": "string",
 		...seanceFields,
 		"+": "delete",
 	});
