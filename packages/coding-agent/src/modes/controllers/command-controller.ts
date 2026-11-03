@@ -26,6 +26,12 @@ import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-ut
 import { getActiveProfile, getConfigDirName } from "@oh-my-pi/pi-utils/dirs";
 import { classifyTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
+import {
+	applyModelRecommendations,
+	formatModelRecommendationReport,
+	probeMagpieGatewayUp,
+	recommendModelsForSession,
+} from "../../config/model-recommender";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
 import { type LoadedCustomShare, loadCustomShare } from "../../export/custom-share";
 import { parseExportArgs } from "../../export/html/args";
@@ -981,6 +987,45 @@ export class CommandController {
 
 		const session = this.ctx.session;
 		const hasFetch = "fetchUsageReports" in session && typeof session.fetchUsageReports === "function";
+		if (verb === "recommend" || verb === "auto") {
+			let reports = canUseDefaultFinopsUsageCache() ? readCachedFinopsUsageReports() : [];
+			if (reports.length === 0 && hasFetch) {
+				try {
+					const fresh = await session.fetchUsageReports();
+					if (fresh && fresh.length > 0) {
+						reports = fresh;
+						if (canUseDefaultFinopsUsageCache()) writeCachedFinopsUsageReports(fresh);
+						seedStatusLineQuotaPools(this.ctx.statusLine, fresh);
+					}
+				} catch {
+					// Proceed with available model metadata if probe fails.
+				}
+			}
+			const magpieGatewayUp = await probeMagpieGatewayUp();
+			const rec = recommendModelsForSession({
+				models: session.getAvailableModels(),
+				reports,
+				settings: this.ctx.settings,
+				magpieGatewayUp,
+			});
+			if (verb === "auto") {
+				const res = await applyModelRecommendations(this.ctx.settings, session, rec);
+				if (res.ok) {
+					this.ctx.statusLine.invalidate();
+					this.ctx.updateEditorBorderColor();
+					this.ctx.showStatus(res.message);
+				} else {
+					this.ctx.showWarning(res.message);
+				}
+				return;
+			}
+			const markdown = formatModelRecommendationReport(rec, this.ctx.settings);
+			this.showCommandReport({
+				title: "Model & Quota Pool Recommendations",
+				body: new Markdown(markdown, 0, 0, getMarkdownTheme()),
+			});
+			return;
+		}
 		if (verb === "refresh") {
 			if (!hasFetch) {
 				this.ctx.showWarning("Usage reporting is not configured for this session.");

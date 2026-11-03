@@ -7,7 +7,7 @@ import { type Component, CURSOR_MARKER, padding, replaceTabs, truncateToWidth, v
 import { formatActionMarker } from "@oh-my-pi/pi-tui/render/extension-links";
 import type { QuotaPoolCapsule } from "@oh-my-pi/pi-tui/status-line";
 import { type ThemeColor, theme } from "@oh-my-pi/pi-tui/theme";
-import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { flattenTodoLeaves, type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 
 export interface MarginHudGitFile {
@@ -685,14 +685,13 @@ function collectTodoView(phases: readonly TodoPhase[]): {
 	taskRows: string[];
 } {
 	const activeTasks: TodoItem[] = [];
-	const blockedTasks: TodoItem[] = [];
 	const pendingTasks: TodoItem[] = [];
 	const completedTasks: TodoItem[] = [];
 	let doneCount = 0;
 	let totalCount = 0;
 
 	for (const phase of phases) {
-		for (const task of phase.tasks) {
+		for (const task of flattenTodoLeaves(phase.tasks)) {
 			if (task.status === "abandoned") continue;
 			totalCount += 1;
 			if (task.status === "completed") {
@@ -700,8 +699,6 @@ function collectTodoView(phases: readonly TodoPhase[]): {
 				completedTasks.push(task);
 			} else if (task.status === "in_progress") {
 				activeTasks.push(task);
-			} else if (task.status === "blocked") {
-				blockedTasks.push(task);
 			} else {
 				pendingTasks.push(task);
 			}
@@ -711,9 +708,6 @@ function collectTodoView(phases: readonly TodoPhase[]): {
 	const taskRows: string[] = [];
 	for (const task of activeTasks) {
 		taskRows.push(`${fg("accent", "▶")} ${fg("text", sanitizeSingleLine(task.content))}`);
-	}
-	for (const task of blockedTasks) {
-		taskRows.push(`${fg("error", "!")} ${fg("warning", sanitizeSingleLine(task.content))}`);
 	}
 	for (const task of pendingTasks) {
 		taskRows.push(`${fg("muted", "○")} ${fg("muted", sanitizeSingleLine(task.content))}`);
@@ -797,6 +791,7 @@ export class ComposerMarginHudFrame implements Component {
 
 		const segments: HudSegment[] = [
 			{ text: presetPart, href: "omp-ui:quota", key: "top:preset" },
+			{ text: fg("success", " ⚡智选"), href: "omp-ui:quota-auto", key: "top:quota-auto" },
 			{ text: sep },
 			{ text: hwSection, href: "omp-ui:hud-refresh", key: "top:hw" },
 		];

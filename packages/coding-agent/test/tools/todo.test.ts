@@ -7,7 +7,9 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	markdownToPhases,
 	nextActionableTask,
+	phasesToMarkdown,
 	resolveTodoMarkdownPath,
+	reconcileTodoPhasesWithCompletedDescriptions,
 	TodoTool,
 } from "@oh-my-pi/pi-coding-agent/tools";
 import {
@@ -1037,5 +1039,125 @@ describe("todoToolRenderer.renderCall preview sanitization", () => {
 		expect(rendered).not.toContain("\t");
 		expect(Bun.stripANSI(rendered)).toContain("ship");
 		expect(Bun.stripANSI(rendered)).toContain("it");
+	});
+});
+
+describe("Multi-level hierarchical TodoTool, rollup counters, and tree rendering", () => {
+	it("parses 3-level indented outlines in init, auto-promotes leaf tasks depth-first, and rolls up parent/phase progress", async () => {
+		const tool = new TodoTool(createSession());
+		const initRes = await tool.execute("call-h1", {
+			op: "init",
+			list: [
+				{
+					phase: "1. 提取与逆向分析",
+					items: [
+						"导出模拟器中的 com.phoenix.read base.apk",
+						"分析 APK 结构与广告模块",
+						"  - 查壳与签名校验",
+						"  - 广告模块定位",
+						"    - 开屏广告入口",
+						"    - 剧集间插屏/激励广告",
+					],
+				},
+				{
+					phase: "2. 补丁与重打包",
+					items: ["编写 Smali 去广告补丁", "重新签名对齐 APK"],
+				},
+			],
+		});
+
+		expect(initRes.isError).toBeUndefined();
+		// 4 leaves in Phase 1 + 2 leaves in Phase 2 = 6 total leaf work units
+		const text0 = initRes.content.find(c => c.type === "text")?.text ?? "";
+		expect(text0).toContain("Overall: 0/6 done, 6 open.");
+		expect(text0).toContain('Active phase 1/2 "1. 提取与逆向分析" (0/4).');
+
+		// Complete leaf 1 -> pointer enters "分析 APK 结构与广告模块" -> "查壳与签名校验"
+		await tool.execute("call-h2", { op: "done", task: "导出模拟器中的 com.phoenix.read base.apk" });
+		// Complete leaf 2 -> pointer enters 3rd-level leaf "开屏广告入口"
+		const step2 = await tool.execute("call-h3", { op: "done", task: "查壳与签名校验" });
+		const phases2 = step2.details?.phases ?? [];
+		const parentTask = phases2[0]?.tasks[1];
+		expect(parentTask?.status).toBe("in_progress");
+		expect(parentTask?.children?.[0]?.status).toBe("completed");
+		expect(parentTask?.children?.[1]?.status).toBe("in_progress");
+		expect(parentTask?.children?.[1]?.children?.[0]?.status).toBe("in_progress");
+
+		// Render card: verify deduplicated Roman numeral ("I. 提取与逆向分析", NOT "I. 1. ...") and nested rollup badges
+		const rendered = Bun.stripANSI(
+			todoToolRenderer.renderResult(step2, { expanded: false, isPartial: false }, theme).render(120).join("\n"),
+		);
+		expect(rendered).toContain("I. 提取与逆向分析  2/4");
+		expect(rendered).not.toContain("I. 1.");
+		expect(rendered).toContain("分析 APK 结构与广告模块 · 1/3");
+		expect(rendered).toContain("广告模块定位 · 0/2");
+		expect(rendered).toContain("开屏广告入口");
+	});
+
+	it("decomposes an existing task mid-flight via append + parent and round-trips nested Markdown checklists", async () => {
+		const tool = new TodoTool(createSession());
+		await tool.execute("call-p1", {
+			op: "init",
+			list: [{ phase: "Reverse", items: ["Export APK", "Analyze ad modules"] }],
+		});
+		await tool.execute("call-p2", { op: "done", task: "Export APK" });
+
+		// Split the currently active "Analyze ad modules" task into 3 subtasks mid-flight!
+		const splitRes = await tool.execute("call-p3", {
+			op: "append",
+			parent: "Analyze ad modules",
+			items: ["Splash ad hook", "Interstitial ad hook", "Bottom mall popup"],
+		});
+		expect(splitRes.isError).toBeUndefined();
+		const parent = splitRes.details?.phases[0]?.tasks[1];
+		expect(parent?.status).toBe("in_progress");
+		expect(parent?.children?.map(c => [c.content, c.status])).toEqual([
+			["Splash ad hook", "in_progress"],
+			["Interstitial ad hook", "pending"],
+			["Bottom mall popup", "pending"],
+		]);
+
+		// Markdown round-trip preserves multi-level hierarchy
+		const md = phasesToMarkdown(splitRes.details!.phases);
+		expect(md).toContain("  - [/] Splash ad hook");
+		expect(md).toContain("  - [ ] Interstitial ad hook");
+		const parsed = markdownToPhases(md);
+		expect(parsed.errors).toEqual([]);
+		expect(parsed.phases[0]?.tasks[1]?.children).toHaveLength(3);
+
+		// Completing the parent cascades to all open children
+		const doneAll = await tool.execute("call-p4", { op: "done", task: "Analyze ad modules" });
+		expect(doneAll.details?.phases[0]?.tasks[1]?.status).toBe("completed");
+		expect(doneAll.details?.phases[0]?.tasks[1]?.children?.every(c => c.status === "completed")).toBe(true);
+	});
+
+	it("reconciles a subagent-matched parent across depth>=3 grandchildren and promotes the next actionable leaf", async () => {
+		const tool = new TodoTool(createSession());
+		const initRes = await tool.execute("call-r1", {
+			op: "init",
+			list: [
+				{
+					phase: "Reverse",
+					items: [
+						"Analyze APK ad modules",
+						"  - SDK group",
+						"    - Splash hook",
+						"    - Interstitial hook",
+						"Repackage & verify APK",
+					],
+				},
+			],
+		});
+		const reconciled = reconcileTodoPhasesWithCompletedDescriptions(initRes.details!.phases, [
+			"Analyze APK ad modules",
+		]);
+		expect(reconciled).toBeDefined();
+		const rootParent = reconciled![0]!.tasks[0]!;
+		expect(rootParent.status).toBe("completed");
+		expect(rootParent.children?.[0]?.status).toBe("completed");
+		expect(rootParent.children?.[0]?.children?.map(g => g.status)).toEqual(["completed", "completed"]);
+		// Next actionable leaf ("Repackage & verify APK") auto-promotes to in_progress
+		expect(nextActionableTask(reconciled!)?.content).toBe("Repackage & verify APK");
+		expect(reconciled![0]!.tasks[1]?.status).toBe("in_progress");
 	});
 });

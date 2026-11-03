@@ -559,6 +559,8 @@ class TodoItem:
     status: TodoStatus
     details: str | None = None
     notes: tuple[str, ...] | None = None
+    children: tuple[TodoItem, ...] | None = None
+    """Optional nested subtasks supporting multi-level decomposition."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1953,6 +1955,7 @@ def parse_todo_item(value: object, path: str = "TodoItem") -> TodoItem:
         status=required(payload, "status", _decode_todo_status, path),
         details=optional(payload, "details", decode_str, path),
         notes=optional(payload, "notes", array(decode_str), path),
+        children=optional(payload, "children", array(parse_todo_item), path),
     )
 
 

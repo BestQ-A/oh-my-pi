@@ -31,6 +31,7 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 | `hello.ts`    | Minimal custom tool example                                                   |
 | `question.ts` | Demonstrates `ctx.ui.select()` for asking the user questions                  |
 | `subagent/`   | Delegate tasks to specialized subagents with isolated context windows         |
+| `web-chat/extension.ts` | `chatgpt_web` and `gemini_web` tools using signed-in Ego Browser website sessions |
 
 ### Commands & UI
 
@@ -65,6 +66,37 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 | `chalk-logger.ts` | Uses chalk from parent node_modules (demonstrates jiti module resolution) |
 | `with-deps/`      | Extension with its own package.json and dependencies                      |
 | `file-trigger.ts` | Watches a trigger file and injects contents into conversation             |
+
+## ChatGPT and Gemini website tools
+
+Load `web-chat/extension.ts` with `omp -e` or create a source-linked extension
+that re-exports its default factory. Keep the whole `web-chat` directory together;
+the runtime loads its sibling browser adapters. Requires `ego-browser` on PATH
+and website login in Ego Lite. API credentials are not used by this extension.
+
+Both tools accept these calls:
+
+```json
+{"action":"status","timeout":30}
+{"action":"ask","prompt":"Review this proposed API: ...","timeout":120}
+```
+
+Results contain `status`, `url`, and, after an answer, `text`. Visible model/plan
+labels and limit messages are included when available. Website labels such as
+`Pro` or `Thinking` do not identify an API model. Numeric remaining quota is not
+inferred. To continue, pass the returned URL as `conversationUrl` on the next ask;
+omitting it starts a new chat. Only the supplied prompt is sent, without automatic
+session/repository context. Answers are ordinary untrusted tool results.
+
+Each extension session owns one browser TaskSpace and serializes operations.
+`status` is a read-tier tool operation; `ask` uses the exec tier. The default
+deadline is 120 seconds (1–600 accepted). A send is never retried automatically.
+Login, visible rate limits, cancellation, and timeout are surfaced explicitly;
+inspect the returned conversation before resubmitting after an uncertain send.
+User takeover stops automation. After login/control recovery, reload the
+extension for a new explicitly requested browser goal. Successful owned spaces
+are finished on session shutdown; caller-owned spaces are never finished by the
+runner. Website DOM changes may require updating the corresponding adapter.
 
 ## Writing Extensions
 

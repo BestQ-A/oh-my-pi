@@ -43,8 +43,15 @@ import type { SlashCommandRuntime, SlashCommandSpec } from "./types";
 import {
 	canUseDefaultFinopsUsageCache,
 	launchDesktopQuotaHud,
+	readCachedFinopsUsageReports,
 	writeCachedFinopsUsageReports,
 } from "../modes/quota-hud-bridge";
+import {
+	applyModelRecommendations,
+	formatModelRecommendationReport,
+	probeMagpieGatewayUp,
+	recommendModelsForSession,
+} from "../config/model-recommender";
 import { cfgComposerMarginHud } from "../modes/settings";
 import { switchSubagentModel } from "../task/subagent-model-switch";
 
@@ -55,6 +62,8 @@ const QUOTA_SUBCOMMANDS: Record<string, true> = {
 	mini: true,
 	close: true,
 	refresh: true,
+	recommend: true,
+	auto: true,
 };
 
 const HUD_SUBCOMMANDS: Record<string, true> = {
@@ -598,9 +607,17 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "gauge",
 		description: "Open live multi-pool quota overlay or desktop HUD",
 		acpDescription: "Show or control multi-pool quota HUD",
-		acpInputHint: "[show|popup|hud|mini|close|refresh]",
+		acpInputHint: "[show|recommend|auto|popup|hud|mini|close|refresh]",
 		subcommands: [
 			{ name: "show", description: "Open TUI multi-pool quota overlay (0ms cached + live refresh)" },
+			{
+				name: "recommend",
+				description: "Recommend optimal models per role based on quota pools and model capabilities",
+			},
+			{
+				name: "auto",
+				description: "Auto-apply optimal models and fallback chains based on quota pools and capabilities",
+			},
 			{ name: "popup", description: "Launch Windows always-on-top Desktop Quota HUD (full cards)" },
 			{ name: "hud", description: "Launch Windows always-on-top Desktop Quota HUD (full cards)" },
 			{ name: "mini", description: "Launch Windows Desktop Quota HUD in Mini Capsule Strip mode" },
@@ -640,7 +657,31 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				await runtime.output(`Refreshed quota pools (${count} account report${count === 1 ? "" : "s"}).`);
 				return commandConsumed();
 			}
-			return usage("Usage: /quota [show|popup|hud|mini|close|refresh]", runtime);
+			if ((verb === "recommend" || verb === "auto") && !rest) {
+				let reports = canUseDefaultFinopsUsageCache() ? readCachedFinopsUsageReports() : [];
+				if (reports.length === 0) {
+					const fresh = await runtime.session.fetchUsageReports();
+					if (fresh && fresh.length > 0) {
+						reports = fresh;
+						if (canUseDefaultFinopsUsageCache()) writeCachedFinopsUsageReports(fresh);
+					}
+				}
+				const magpieGatewayUp = await probeMagpieGatewayUp();
+				const rec = recommendModelsForSession({
+					models: runtime.session.getAvailableModels(),
+					reports,
+					settings: runtime.settings,
+					magpieGatewayUp,
+				});
+				if (verb === "auto") {
+					const res = await applyModelRecommendations(runtime.settings, runtime.session, rec);
+					await runtime.output(`${res.message}\n\n${formatModelRecommendationReport(rec, runtime.settings)}`);
+					return commandConsumed({ failed: !res.ok });
+				}
+				await runtime.output(formatModelRecommendationReport(rec, runtime.settings));
+				return commandConsumed();
+			}
+			return usage("Usage: /quota [show|recommend|auto|popup|hud|mini|close|refresh]", runtime);
 		},
 		handleTui: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
@@ -653,7 +694,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				clearSubmittedText(runtime);
 				return;
 			}
-			runtime.ctx.showStatus("Usage: /quota [show|popup|hud|mini|close|refresh]");
+			runtime.ctx.showStatus("Usage: /quota [show|recommend|auto|popup|hud|mini|close|refresh]");
 			clearSubmittedText(runtime);
 		},
 	},

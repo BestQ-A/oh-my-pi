@@ -172,4 +172,17 @@ describe("status line model segment compact thinking level", () => {
 		expect(Bun.stripANSI(rendered.content)).toBe(`${glyph} Test Model`);
 		expect(Bun.stripANSI(rendered.content)).not.toContain(theme.sep.dot);
 	});
+	it("prefixes the model name with provider unless showProvider is false", () => {
+		const ctx = createThinkingContext(true);
+		ctx.session.state.model = {
+			id: "gemini-4-argon",
+			name: "Gemini 4 Argon",
+			provider: "google-antigravity",
+			thinking: true,
+		} as SegmentContext["session"]["state"]["model"];
+		expect(Bun.stripANSI(renderSegment("model", ctx).content)).toContain("google-antigravity/Gemini 4 Argon");
+
+		ctx.options = { model: { showProvider: false } };
+		expect(Bun.stripANSI(renderSegment("model", ctx).content)).not.toContain("google-antigravity/");
+	});
 });

@@ -3769,6 +3769,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				}
 			}
 			const leftOverflowDropIndex = (): number => {
+				// Drop hostname before model/git/path so a long provider-prefixed model
+				// name stays visible on narrow 4-edge HUD widths.
+				const hostnameIdx = leftSegIds.indexOf("hostname");
+				if (hostnameIdx >= 0) return hostnameIdx;
 				// Preserve the current working directory as long as possible. The
 				// previous right-to-left pop could collapse a normal-width bar to
 				// just the model segment, hiding the path before less-critical left

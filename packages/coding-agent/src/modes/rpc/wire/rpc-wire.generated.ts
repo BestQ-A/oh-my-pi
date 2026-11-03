@@ -410,6 +410,8 @@ export interface TodoItem {
 	status: TodoStatus;
 	details?: string;
 	notes?: string[];
+	/** Optional nested subtasks supporting multi-level decomposition. */
+	children?: TodoItem[];
 }
 
 export interface TodoPhase {

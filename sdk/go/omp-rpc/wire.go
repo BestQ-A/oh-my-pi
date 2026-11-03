@@ -2171,6 +2171,8 @@ type TodoItem struct {
 	Status  TodoStatus `json:"status"`
 	Details *string    `json:"details,omitempty"`
 	Notes   []string   `json:"notes,omitempty"`
+	// Optional nested subtasks supporting multi-level decomposition.
+	Children []TodoItem `json:"children,omitempty"`
 }
 
 func (v *TodoItem) UnmarshalJSON(data []byte) error {
@@ -2184,6 +2186,7 @@ func (v *TodoItem) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("status", &out.Status)
 	d.optional("details", &out.Details)
 	d.optional("notes", &out.Notes)
+	d.optional("children", &out.Children)
 	if d.err != nil {
 		return d.err
 	}

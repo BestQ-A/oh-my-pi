@@ -60,7 +60,9 @@ import {
 import type { Settings } from "./settings";
 
 import { cfgDisabledProviders, cfgEnabledModels, cfgModelProviderOrder } from "./model-settings";
-import { cfgRetryFallbackChains } from "../session/settings";
+import { canUseDefaultFinopsUsageCache, readCachedFinopsUsageReports } from "../modes/quota-hud-bridge";
+import { cfgRetryFallbackChains, cfgRetryUsageAwareFallback } from "../session/settings";
+import { evaluateModelPoolHealth } from "./model-recommender";
 
 function isKnownProvider(provider: string): provider is KnownProvider {
 	return provider in DEFAULT_MODEL_PER_PROVIDER;
@@ -1863,13 +1865,41 @@ export async function resolveModelOverrideWithAuthFallback(
 		return { ...primary, authFallbackUsed: false };
 	}
 
+	const expandedPatterns = resolveConfiguredModelPatterns(modelPatterns, settings);
 	const primaryKey = await modelRegistry.getApiKey(primary.model, sessionId);
 	if (primaryKey === kNoAuth || isAuthenticated(primaryKey)) {
+		if (
+			expandedPatterns.length > 1 &&
+			settings &&
+			cfgRetryUsageAwareFallback.get(settings) &&
+			canUseDefaultFinopsUsageCache()
+		) {
+			const cachedReports = readCachedFinopsUsageReports();
+			if (
+				cachedReports.length > 0 &&
+				evaluateModelPoolHealth(primary.model.provider, primary.model.id, cachedReports).state === "exhausted"
+			) {
+				for (const pattern of expandedPatterns) {
+					const candidate = resolveModelOverride([pattern], lookupRegistry, settings);
+					if (!candidate.model || modelsAreEqual(candidate.model, primary.model)) continue;
+					if (
+						evaluateModelPoolHealth(candidate.model.provider, candidate.model.id, cachedReports).state ===
+						"exhausted"
+					) {
+						continue;
+					}
+					const candidateKey = await modelRegistry.getApiKey(candidate.model, sessionId);
+					if (candidateKey === kNoAuth || isAuthenticated(candidateKey)) {
+						return { ...candidate, authFallbackUsed: false };
+					}
+				}
+			}
+		}
 		return { ...primary, authFallbackUsed: false };
 	}
 	// The ordered override list is the caller's own fallback chain: an
 	// authenticated later entry beats the parent's model.
-	for (const pattern of resolveConfiguredModelPatterns(modelPatterns, settings)) {
+	for (const pattern of expandedPatterns) {
 		const candidate = resolveModelOverride([pattern], lookupRegistry, settings);
 		if (!candidate.model || modelsAreEqual(candidate.model, primary.model)) continue;
 		const candidateKey = await modelRegistry.getApiKey(candidate.model, sessionId);
