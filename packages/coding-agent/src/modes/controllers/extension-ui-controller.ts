@@ -44,6 +44,7 @@ import { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
 import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-links";
 import { HookSelectorComponent, type HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
+import { controlComposer } from "../composer";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -205,6 +206,7 @@ export class ExtensionUiController {
 				this.ctx.ui.requestRender();
 			},
 			getEditorText: () => this.ctx.editor.getText(),
+			controlEditor: operation => controlComposer(this.ctx, operation),
 			editor: (title, prefill, dialogOptions, editorOptions) =>
 				this.showCollabAwareEditor(title, prefill, dialogOptions, editorOptions),
 			addAutocompleteProvider: factory => this.ctx.addAutocompleteProvider(factory),

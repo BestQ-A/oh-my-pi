@@ -955,6 +955,31 @@ up to 10 content lines plus a truncation notice). Pass `undefined` to remove a
 widget. `setEditorText` and `pasteToEditor` request a repaint after mutating the
 editor.
 
+#### Operating the main composer
+
+The interactive TUI also exposes `ctx.ui.controlEditor(operation)`. The built-in
+`composer` tool uses the same method, so a model can read, edit, and submit its own
+input draft. Headless, RPC, ACP, and subagent sessions do not expose this tool.
+
+```ts
+const draft = ctx.ui.controlEditor?.({ action: "read" });
+if (draft?.available) {
+	ctx.ui.controlEditor?.({ action: "set", text: "Follow-up task", expectedText: draft.text });
+	ctx.ui.controlEditor?.({ action: "submit", expectedText: "Follow-up task" });
+}
+```
+
+`read` returns expanded `text`, `imageCount`, `available`, and an optional
+`blockedReason`. `set` and `append` require text and preserve attachments;
+`clear` removes both text and pending attachments. `expectedText` rejects a
+mutation if the draft changed since the preceding read. `submit` can optionally
+replace text in the same operation, then follows Enter's input hooks, slash
+commands, and streaming-message queue. Its `submitted: true` result means the
+input was handed to that pipeline; it does not wait for the command or next
+model turn to finish. Empty submissions are rejected. Mutations are unavailable
+while a dialog, approval, focused subagent, or dictation owns the composer.
+
+
 #### Launching terminal commands
 
 `ctx.ui.openTerminal(request)` is available only in the interactive TUI. It creates a

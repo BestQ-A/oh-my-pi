@@ -7,7 +7,7 @@ import {
 	resolveTodoMarkdownPath,
 	USER_TODO_EDIT_CUSTOM_TYPE,
 } from "../../tools/todo";
-import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { flattenAllTodoItems, type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { copyToClipboard } from "../../utils/clipboard";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import type { InteractiveModeContext } from "../types";
@@ -94,13 +94,13 @@ function findTaskFuzzy(phases: TodoPhase[], query: string): { task: TodoItem; ph
 	if (!q) return undefined;
 	// Exact content (case-insensitive)
 	for (const phase of phases) {
-		for (const task of phase.tasks) {
+		for (const task of flattenAllTodoItems(phase.tasks)) {
 			if (task.content.toLowerCase() === q) return { task, phase };
 		}
 	}
 	const matches: Array<{ task: TodoItem; phase: TodoPhase }> = [];
 	for (const phase of phases) {
-		for (const task of phase.tasks) {
+		for (const task of flattenAllTodoItems(phase.tasks)) {
 			if (task.content.toLowerCase().includes(q)) {
 				matches.push({ task, phase });
 			}

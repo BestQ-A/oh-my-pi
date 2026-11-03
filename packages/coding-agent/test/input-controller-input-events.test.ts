@@ -8,6 +8,7 @@ import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensi
 import type { ExtensionFactory, InputEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { buildSkillPromptMessage, type Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import { controlComposer } from "@oh-my-pi/pi-coding-agent/modes/composer";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { getEditorTheme } from "@oh-my-pi/pi-tui/theme/tui-adapters";
@@ -53,6 +54,8 @@ async function createHarness(factory: ExtensionFactory) {
 	const prompt = vi.fn(async (_text: string, _options?: PromptOptions) => true);
 	const session = {
 		extensionRunner: runner,
+		customCommands: [],
+		promptTemplates: [],
 		isStreaming: true,
 		isCompacting: false,
 		queuedMessageCount: 0,
@@ -65,6 +68,7 @@ async function createHarness(factory: ExtensionFactory) {
 	};
 	const ctx = {
 		editor,
+		editorContainer: { children: [editor] },
 		session,
 		viewSession: session,
 		sessionManager,
@@ -77,6 +81,7 @@ async function createHarness(factory: ExtensionFactory) {
 			addInputListener: vi.fn(),
 			addStartListener: vi.fn(),
 			getFocused: () => editor,
+			hasOverlay: () => false,
 			terminal: { write: vi.fn() },
 		},
 		compactionQueuedMessages: [],
@@ -98,6 +103,7 @@ async function createHarness(factory: ExtensionFactory) {
 		showStatus: vi.fn(),
 		showError: vi.fn(),
 		handleClearCommand: vi.fn(),
+		handleResetContextCommand: vi.fn(),
 		resetDisplayAfterAppearanceRefresh: vi.fn(),
 		shutdown: vi.fn(async () => {}),
 		clearEditor: () => editor.clearDraft(),
@@ -134,7 +140,7 @@ async function createHarness(factory: ExtensionFactory) {
 		editor.imageLinks = editor.pendingImageLinks;
 		editor.setText(text);
 	}
-	return { ctx, editor, session, prompt, runner, blobs, generatedMessages, pressSubmit, draftWithImage };
+	return { ctx, editor, controller, session, prompt, runner, blobs, generatedMessages, pressSubmit, draftWithImage };
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -841,5 +847,89 @@ describe("interactive native input ingress", () => {
 		expect(h.generatedMessages).toEqual(["handler-generated work"]);
 		expect(downstream).not.toHaveBeenCalled();
 		expect(h.prompt).not.toHaveBeenCalled();
+	});
+});
+
+describe("model composer operations", () => {
+	it("rejects stale edits and submissions without losing a user's newer draft or attachments", async () => {
+		const h = await createHarness(() => {});
+		h.draftWithImage();
+		const before = controlComposer(h.ctx, { action: "read" });
+		h.editor.setText("newer draft [Image #1]");
+		for (const action of ["set", "submit"] as const) {
+			expect(() => controlComposer(h.ctx, { action, text: "replacement", expectedText: before.text })).toThrow();
+		}
+		expect(h.editor.getExpandedText()).toBe("newer draft [Image #1]");
+		expect(h.editor.pendingImages).toEqual([originalImage]);
+		expect(h.prompt).not.toHaveBeenCalled();
+	});
+
+	it("submits through input hooks once and preserves typing while a hook is pending", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const h = await createHarness(pi => {
+			pi.on("input", async event => {
+				entered.resolve();
+				await release.promise;
+				return { text: `transformed ${event.text}` };
+			});
+		});
+		controlComposer(h.ctx, { action: "submit", text: "queued by model", expectedText: "" });
+		await entered.promise;
+		h.editor.setText("user typing");
+		release.resolve();
+		await h.controller.waitForSubmissionDispatches();
+		expect(h.prompt.mock.calls).toEqual([
+			["transformed queued by model", { streamingBehavior: "steer", images: undefined }],
+		]);
+		expect(h.editor.getText()).toBe("user typing");
+	});
+
+	it("dispatches slash commands locally instead of forwarding them as model prompts", async () => {
+		const h = await createHarness(() => {});
+		controlComposer(h.ctx, { action: "submit", text: "/clear" });
+		await h.controller.waitForSubmissionDispatches();
+		expect(h.ctx.handleResetContextCommand).toHaveBeenCalledTimes(1);
+		expect(h.prompt).not.toHaveBeenCalled();
+	});
+
+	it("blocks mutations while an approval owns the composer and resumes afterward", async () => {
+		const h = await createHarness(() => {});
+		h.draftWithImage();
+		h.ctx.approvalOwnsComposer = true;
+		expect(controlComposer(h.ctx, { action: "read" }).available).toBe(false);
+		expect(() => controlComposer(h.ctx, { action: "clear" })).toThrow();
+		expect(h.editor.pendingImages).toEqual([originalImage]);
+		h.ctx.approvalOwnsComposer = false;
+		controlComposer(h.ctx, { action: "clear" });
+		expect(h.editor.getText()).toBe("");
+		expect(h.editor.pendingImages).toEqual([]);
+		expect(h.editor.pendingImageLinks).toEqual([]);
+	});
+
+	it("never sends a main agent operation into the viewed subagent", async () => {
+		const h = await createHarness(() => {});
+		Object.defineProperty(h.ctx, "focusedAgentId", { value: "child" });
+		h.editor.setText("child draft");
+		expect(() => controlComposer(h.ctx, { action: "submit" })).toThrow();
+		expect(h.editor.getText()).toBe("child draft");
+		expect(h.prompt).not.toHaveBeenCalled();
+	});
+
+	it("rejects empty submission instead of interrupting the running agent", async () => {
+		const h = await createHarness(() => {});
+		expect(() => controlComposer(h.ctx, { action: "submit" })).toThrow();
+		expect(h.session.abort).not.toHaveBeenCalled();
+		expect(h.prompt).not.toHaveBeenCalled();
+	});
+
+	it("expands paste atoms before appending and keeps pending attachments until explicit clear", async () => {
+		const h = await createHarness(() => {});
+		h.draftWithImage();
+		h.editor.registerAtom("[Paste]", "expanded paste");
+		h.editor.setText("[Paste] [Image #1]");
+		controlComposer(h.ctx, { action: "append", text: " suffix", expectedText: "expanded paste [Image #1]" });
+		expect(h.editor.getExpandedText()).toBe("expanded paste [Image #1] suffix");
+		expect(h.editor.pendingImages).toEqual([originalImage]);
 	});
 });

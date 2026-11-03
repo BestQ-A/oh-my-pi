@@ -36,6 +36,7 @@ export const stateDefs = {
 		"blocker?": doc("string", "What a `blocked` task is waiting on."),
 		"details?": "string",
 		"notes?": "string[]",
+		"children?": doc("TodoItem[]", "Optional nested subtasks supporting multi-level decomposition."),
 	},
 	TodoPhase: { name: "string", tasks: "TodoItem[]" },
 	ContextUsage: { tokens: "number.integer", contextWindow: "number.integer", percent: "number" },

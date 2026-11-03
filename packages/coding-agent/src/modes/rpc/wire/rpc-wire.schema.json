@@ -2358,6 +2358,13 @@
 					"items": {
 						"type": "string"
 					}
+				},
+				"children": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/TodoItem"
+					},
+					"description": "Optional nested subtasks supporting multi-level decomposition."
 				}
 			},
 			"required": [

@@ -556,6 +556,8 @@ class TodoItem:
     """What a `blocked` task is waiting on."""
     details: str | None = None
     notes: tuple[str, ...] | None = None
+    children: tuple[TodoItem, ...] | None = None
+    """Optional nested subtasks supporting multi-level decomposition."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1908,6 +1910,7 @@ def parse_todo_item(value: object, path: str = "TodoItem") -> TodoItem:
         blocker=optional(payload, "blocker", decode_str, path),
         details=optional(payload, "details", decode_str, path),
         notes=optional(payload, "notes", array(decode_str), path),
+        children=optional(payload, "children", array(parse_todo_item), path),
     )
 
 

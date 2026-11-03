@@ -203,13 +203,17 @@ import {
 	createTodoHudStateData,
 	getTodoHudVisibility,
 	nextActionableTask,
+	reconcileTodoPhasesWithCompletedDescriptions,
 	TODO_HUD_STATE_CUSTOM_TYPE,
 	USER_TODO_EDIT_CUSTOM_TYPE,
 	type TodoHudStateEntryData,
 } from "../tools/todo";
 import {
+	countTodoLeaves,
+	flattenTodoLeaves,
 	formatPhaseDisplayName,
 	isClosedTodo,
+	renderTodoItemsTree,
 	selectCollapsedTodos,
 	setActiveTodoDescriptionsProvider,
 	todoMatchesAnyDescription,
@@ -4514,6 +4518,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			case "omp-ui:quota":
 				void this.handleQuotaCommand();
 				return true;
+			case "omp-ui:quota-auto":
+				void this.handleQuotaCommand("auto");
+				return true;
 			case "omp-ui:model":
 				this.showModelSelector({ temporaryOnly: true });
 				return true;
@@ -5097,21 +5104,37 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 	}
 
-	#formatTodoLine(todo: TodoItem, prefix: string, matched: boolean): string {
+	#formatTodoLine(todo: TodoItem, prefix: string, matched: boolean, childProgressSuffix = ""): string {
 		const checkbox = theme.checkbox;
 		const marker = formatHudNoteMarker(todo.notes?.length ?? 0);
 		switch (todo.status) {
 			case "completed":
-				return theme.fg("success", `${prefix}${checkbox.checked} ${chalk.strikethrough(todo.content)}`) + marker;
+				return (
+					theme.fg("success", `${prefix}${checkbox.checked} ${chalk.strikethrough(todo.content)}`) +
+					childProgressSuffix +
+					marker
+				);
 			case "in_progress":
-				return theme.fg("accent", `${prefix}${checkbox.unchecked} ${todo.content}`) + marker;
+				return theme.fg("accent", `${prefix}◉ ${todo.content}`) + childProgressSuffix + marker;
 			case "abandoned":
-				return theme.fg("error", `${prefix}${checkbox.unchecked} ${chalk.strikethrough(todo.content)}`) + marker;
+				return (
+					theme.fg("error", `${prefix}${checkbox.unchecked} ${chalk.strikethrough(todo.content)}`) +
+					childProgressSuffix +
+					marker
+				);
 			case "blocked":
-				return theme.fg("warning", `${prefix}${checkbox.unchecked} ${todo.content} (blocked)`) + marker;
+				return (
+					theme.fg("warning", `${prefix}${checkbox.unchecked} ${todo.content} (blocked)`) +
+					childProgressSuffix +
+					marker
+				);
 			default:
-				if (matched) return theme.fg("accent", `${prefix}${checkbox.unchecked} ${todo.content}`) + marker;
-				return theme.fg("dim", `${prefix}${checkbox.unchecked} ${todo.content}`) + marker;
+				if (matched) {
+					return (
+						theme.fg("accent", `${prefix}${checkbox.unchecked} ${todo.content}`) + childProgressSuffix + marker
+					);
+				}
+				return theme.fg("dim", `${prefix}${checkbox.unchecked} ${todo.content}`) + childProgressSuffix + marker;
 		}
 	}
 
@@ -5151,21 +5174,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (completedDescs.length === 0) return;
 
-		let mutated = false;
-		const next: TodoPhase[] = this.todoPhases.map(phase => ({
-			name: phase.name,
-			tasks: phase.tasks.map(task => {
-				if (task.status !== "pending" && task.status !== "in_progress" && task.status !== "blocked") {
-					return task;
-				}
-				if (!todoMatchesAnyDescription(task.content, completedDescs)) return task;
-				mutated = true;
-				// Drop any blocker note along with the blocked status — the wait the
-				// note described is over.
-				return { content: task.content, status: "completed" as const };
-			}),
-		}));
-		if (!mutated) return;
+		const next = reconcileTodoPhasesWithCompletedDescriptions(this.todoPhases, completedDescs);
+		if (!next) return;
 		// Persist into the session that owns the snapshot we derived `next` from,
 		// not `viewSession`: the two diverge mid focus-attach, and writing to the
 		// destination there would clobber its canonical plan. Leaving the owner
@@ -5274,7 +5284,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#getActivePhase(phases: TodoPhase[]): TodoPhase | undefined {
 		const nonEmpty = phases.filter(phase => phase.tasks.length > 0);
 		const active = nonEmpty.find(phase =>
-			phase.tasks.some(task => task.status === "pending" || task.status === "in_progress"),
+			flattenTodoLeaves(phase.tasks).some(task => task.status === "pending" || task.status === "in_progress"),
 		);
 		return active ?? nonEmpty[nonEmpty.length - 1];
 	}
@@ -5348,41 +5358,47 @@ export class InteractiveMode implements InteractiveModeContext {
 		// policy (completed/abandoned omitted, active work pulled to the head,
 		// then following pending tasks) so the HUD and the transient tool result
 		// can never disagree about the current work (#5873). Expanded lists all.
-		const renderTasks = (phase: TodoPhase): string[] => {
-			if (expanded) {
-				return renderTreeList(
-					{
-						items: phase.tasks,
-						expanded: true,
-						renderItem: todo => this.#formatTodoLine(todo, "", isMatched(todo)),
-					},
-					theme,
-				);
-			}
-			const selection = selectCollapsedTodos(phase.tasks, isMatched, activeTaskCap);
-			return renderTreeList(
-				{
-					items: selection.items,
-					itemType: "task",
-					trailingSummary: selection.summary,
-					renderItem: todo => this.#formatTodoLine(todo, "", isMatched(todo)),
-				},
-				theme,
-			);
+		const renderTasks = (phase: TodoPhase): string[] =>
+			renderTodoItemsTree({
+				tasks: phase.tasks,
+				uiTheme: theme,
+				expanded,
+				cap: activeTaskCap,
+				isMatched,
+				itemType: "task",
+				renderLine: (todo, matched, childProgressSuffix) =>
+					this.#formatTodoLine(todo, "", matched, childProgressSuffix),
+			});
+
+		const termCols = Math.max(60, (this.ui?.terminal?.columns ?? process.stdout.columns ?? 120) - 14);
+		const renderCollapsedStagePreview = (phase: TodoPhase): string | undefined => {
+			if (phases.length > 5) return undefined;
+			const openTop = phase.tasks.filter(t => !isClosedTodo(t));
+			if (openTop.length === 0) return undefined;
+			const summaryText = openTop
+				.slice(0, 3)
+				.map(t => {
+					const sub = t.children?.length ? ` (${countTodoLeaves(t.children).total})` : "";
+					return `${replaceTabs(t.content)}${sub}`;
+				})
+				.join(" · ");
+			const more = openTop.length > 3 ? ` (+${openTop.length - 3})` : "";
+			const clipped = truncateToWidth(`${summaryText}${more}`, Math.max(30, termCols - 8));
+			return `${theme.fg("dim", `${theme.tree.last} ↳ ${clipped}`)}`;
 		};
 
-		// One phase node. The active stage is highlighted with normal-brightness task
-		// progress; other stages render their whole row (name + progress) in the
-		// brighter muted gray. Overall progress lives in the tree spine (below).
+		// One phase node. The active stage is highlighted with leaf-accurate progress
+		// and percentage; upcoming stages also preview their top-level items in 1 line.
 		const renderPhase = (phase: TodoPhase, oneBased: number, isActive: boolean): string | string[] => {
 			const label = multiPhase ? formatPhaseDisplayName(phase.name, oneBased) : phase.name;
-			// Closed, not just completed: the collapsed task window hides abandoned
-			// tasks too, so counting only completions leaves the phase reading stuck.
-			const done = phase.tasks.filter(isClosedTodo).length;
-			const progress = ` · ${done}/${phase.tasks.length}`;
+			const { done, total } = countTodoLeaves(phase.tasks);
+			const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+			const progress = isActive && total > 0 ? ` · ${done}/${total} (${pct}%)` : ` · ${done}/${total}`;
 			if (!isActive) {
 				const header = theme.fg("muted", label) + theme.fg("dim", progress);
-				return expanded ? [header, ...renderTasks(phase)] : header;
+				if (expanded) return [header, ...renderTasks(phase)];
+				const preview = renderCollapsedStagePreview(phase);
+				return preview ? [header, preview] : header;
 			}
 			const header = theme.bold(theme.fg("accent", label)) + theme.fg("dim", progress);
 			return [header, ...renderTasks(phase)];
@@ -5427,14 +5443,23 @@ export class InteractiveMode implements InteractiveModeContext {
 		// order: down the spine, around the bend, out along the tail.
 		// Clamp so partial progress lights at least one cell; a closed plan fills
 		// the entire path until the configured auto-clear removes the HUD.
-		const totalTasks = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
-		const closedTasks = phases.reduce((sum, phase) => sum + phase.tasks.filter(isClosedTodo).length, 0);
+		const totals = phases.reduce(
+			(acc, phase) => {
+				const c = countTodoLeaves(phase.tasks);
+				return { done: acc.done + c.done, total: acc.total + c.total };
+			},
+			{ done: 0, total: 0 },
+		);
+		const totalTasks = Math.max(1, totals.total);
+		const closedTasks = totals.done;
+		const overallPct = Math.round((closedTasks / totalTasks) * 100);
 		const pathLen = contentLines.length + tailLen;
 		let filled = Math.round((closedTasks / totalTasks) * pathLen);
 		if (closedTasks > 0) filled = Math.max(filled, 1);
 		if (closedTasks < totalTasks) filled = Math.min(filled, pathLen - 1);
 
-		const lines = ["", theme.bold(theme.fg("accent", "TODO"))];
+		const todoHeader = `${theme.bold(theme.fg("accent", "TODO"))}${theme.fg("dim", ` · ${closedTasks}/${totals.total} (${overallPct}%)`)}`;
+		const lines = ["", todoHeader];
 		for (let i = 0; i < contentLines.length; i++) {
 			lines.push(` ${theme.fg(i < filled ? "accent" : "dim", spineGlyphs[i]!)}${contentLines[i]}`);
 		}
@@ -5456,9 +5481,27 @@ export class InteractiveMode implements InteractiveModeContext {
 								? "accent"
 								: "dim";
 			const label: TspSpan[] = [span(todo.status === "blocked" ? `${todo.content} (blocked)` : todo.content, token)];
+			if (todo.children?.length) {
+				const c = countTodoLeaves(todo.children);
+				label.push(span(` · ${c.done}/${c.total}`, "dim"));
+			}
 			const notes = todo.notes?.length ?? 0;
 			if (notes > 0) label.push(span(` +${notes}`, "dim em"));
-			return { id, label, icon: done ? "check" : "circle" };
+			const hasChildren = Boolean(todo.children?.length);
+			const openChildren = hasChildren && (expanded || !isClosedTodo(todo));
+			return {
+				id,
+				label,
+				icon: done ? "check" : "circle",
+				...(hasChildren
+					? {
+							open: openChildren,
+							children: openChildren
+								? todo.children!.map((child, idx) => describeTask(child, `${id}.${idx}`))
+								: undefined,
+						}
+					: {}),
+			};
 		};
 		const describeTasks = (phase: TodoPhase, phaseIndex: number): TspTreeNode[] => {
 			const index = (todo: TodoItem): string => `${phaseIndex}.${phase.tasks.indexOf(todo)}`;
@@ -5472,11 +5515,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			const phaseIndex = baseIdx + offset;
 			const isActive = phaseIndex === activeIdx;
 			const name = multiPhase ? formatPhaseDisplayName(phase.name, phaseIndex + 1) : phase.name;
-			const done = phase.tasks.filter(isClosedTodo).length;
+			const { done, total } = countTodoLeaves(phase.tasks);
 			const open = isActive || expanded;
 			return {
 				id: `${phaseIndex}`,
-				label: [span(name, isActive ? "accent strong" : "muted"), span(` · ${done}/${phase.tasks.length}`, "dim")],
+				label: [span(name, isActive ? "accent strong" : "muted"), span(` · ${done}/${total}`, "dim")],
 				open,
 				children: open ? describeTasks(phase, phaseIndex) : undefined,
 			};
@@ -5547,8 +5590,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		const isMatched = (todo: TodoItem): boolean =>
 			activeDescs.length > 0 && todoMatchesAnyDescription(todo.content, activeDescs);
 
-		const totalTasks = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
-		const closedTasks = phases.reduce((sum, phase) => sum + phase.tasks.filter(isClosedTodo).length, 0);
+		const compactTotals = phases.reduce(
+			(acc, phase) => {
+				const c = countTodoLeaves(phase.tasks);
+				return { done: acc.done + c.done, total: acc.total + c.total };
+			},
+			{ done: 0, total: 0 },
+		);
+		const totalTasks = compactTotals.total;
+		const closedTasks = compactTotals.done;
 		const activeTask = nextActionableTask(phases);
 
 		const header = `${theme.bold(theme.fg("accent", "TODO"))} ${theme.fg("dim", `${closedTasks}/${totalTasks}`)}`;

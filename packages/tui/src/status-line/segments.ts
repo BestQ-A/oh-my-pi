@@ -291,11 +291,15 @@ const statusSegment: StatusLineSegment = {
 	},
 };
 
-/** Display name of the active model (`Claude ` prefix dropped). */
+/** Display name of the active model (`Claude ` prefix dropped, prefixed with `provider/` unless disabled). */
 function modelDisplayName(ctx: SegmentContext): string {
 	const state = ctx.session.state;
-	const modelName = state.model?.name || state.model?.id || "no-model";
-	return modelName.startsWith("Claude ") ? modelName.slice(7) : modelName;
+	const rawName = state.model?.name || state.model?.id || "no-model";
+	const modelName = rawName.startsWith("Claude ") ? rawName.slice(7) : rawName;
+	if (ctx.options.model?.showProvider === false) return modelName;
+	const provider = state.model?.provider?.trim();
+	if (!provider || modelName === "no-model" || modelName.startsWith(`${provider}/`)) return modelName;
+	return `${provider}/${modelName}`;
 }
 
 /**

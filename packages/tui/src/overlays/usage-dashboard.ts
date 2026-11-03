@@ -822,6 +822,15 @@ export interface UsageDashboardOptions {
 	presets?: ReadonlyArray<{ name: string; active: boolean }>;
 	/** Switch active model preset when pressing `1`..`9` in the dashboard. */
 	onSwitchPreset?: (name: string) => Promise<{ ok: boolean; message: string; activeName?: string }>;
+	/** Resource-pool + capability recommendation summary rendered in the top bar. */
+	recommendationSummary?: string;
+	/** Apply the recommended model routing (`a` key or click). */
+	onApplyRecommendation?: () => Promise<{
+		ok: boolean;
+		message: string;
+		activeName?: string;
+		recommendationSummary?: string;
+	}>;
 	/** Launch or bring forward the standalone Desktop Quota HUD (`p` / `P`). */
 	onOpenDesktopHud?: () => Promise<string> | string;
 	requestRender: () => void;
@@ -868,6 +877,7 @@ export class UsageDashboardComponent implements Component {
 	#unavailableAccounts: readonly UnavailableUsageAccount[] | undefined;
 	#presets: Array<{ name: string; active: boolean }>;
 	#switchingPreset = false;
+	#recommendationSummary: string | undefined;
 	#actionBanner: string | null = null;
 	#nowMs: number;
 	#refreshing = false;
@@ -902,6 +912,7 @@ export class UsageDashboardComponent implements Component {
 		this.#presets = options.presets
 			? options.presets.map(preset => ({ name: preset.name, active: preset.active }))
 			: [];
+		this.#recommendationSummary = options.recommendationSummary;
 		this.#nowMs = Date.now();
 		this.#cards = buildProviderCards(this.#reports, this.#nowMs, this.#unavailableAccounts);
 		this.#panel = new OverlayPanel("Usage");
@@ -933,10 +944,17 @@ export class UsageDashboardComponent implements Component {
 	}
 
 	/** Push updated usage reports from an asynchronous background refresh while open. */
-	updateReports(reports: UsageReport[], unavailableAccounts?: readonly UnavailableUsageAccount[]): void {
+	updateReports(
+		reports: UsageReport[],
+		unavailableAccounts?: readonly UnavailableUsageAccount[],
+		recommendationSummary?: string,
+	): void {
 		if (this.#closed) return;
 		if (unavailableAccounts !== undefined) {
 			this.#unavailableAccounts = unavailableAccounts;
+		}
+		if (recommendationSummary !== undefined) {
+			this.#recommendationSummary = recommendationSummary;
 		}
 		this.#reports = reports;
 		this.#nowMs = Date.now();
@@ -1418,6 +1436,22 @@ export class UsageDashboardComponent implements Component {
 				lines.push(truncateToWidth(currentLine, innerWidth));
 			}
 		}
+		if (this.#recommendationSummary) {
+			const cleanRec = sanitizeDisplayLine(this.#recommendationSummary);
+			const applyPill = this.#options.onApplyRecommendation
+				? `  ${formatActionMarker(
+						theme.bold(theme.fg("success", "[a 一键智选]")),
+						"omp-overlay:apply-recommendation",
+						"header-apply-rec",
+					)}`
+				: "";
+			lines.push(
+				truncateToWidth(
+					`${theme.bold(theme.fg("accent", "💡 智选推荐"))}  ${theme.fg("text", cleanRec)}${applyPill}`,
+					innerWidth,
+				),
+			);
+		}
 		if (innerWidth >= 44) {
 			const leftOpt = this.#quotaLeft
 				? `${theme.fg("success", "●")} ${theme.bold(theme.fg("success", "剩余 Left"))}`
@@ -1586,6 +1620,7 @@ export class UsageDashboardComponent implements Component {
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (event.type === "action") {
 			if (event.act === "refresh") void this.#refresh();
+			else if (event.act === "apply-recommendation") void this.#applyRecommendation();
 			else if (event.act === "desktop-hud") this.#openDesktopHud();
 			else if (event.act === "close") this.#close();
 			return;
@@ -1642,6 +1677,9 @@ export class UsageDashboardComponent implements Component {
 			node("spacer", { grow: 1 }),
 			node("row", { gap: "xs", align: "baseline", shrink: 1 }, checked, "checked"),
 		];
+		if (this.#options.onApplyRecommendation) {
+			children.push(actionButton("Auto Route", "apply-recommendation", { keys: "a" }));
+		}
 		if (this.#options.onOpenDesktopHud) children.push(actionButton("Desktop HUD", "desktop-hud", { keys: "p" }));
 		if (this.#options.refresh) children.push(actionButton("Refresh", "refresh", { keys: "r" }));
 		return node("row", { role: "omp.usage.head", gap: "md", align: "center" }, children, "head");
@@ -2306,6 +2344,33 @@ export class UsageDashboardComponent implements Component {
 		}
 	}
 
+	async #applyRecommendation(): Promise<void> {
+		const onApply = this.#options.onApplyRecommendation;
+		if (!onApply || this.#refreshing || this.#switchingPreset || this.#closed) return;
+		this.#switchingPreset = true;
+		this.#actionBanner = "正在根据资源池余量与模型能力自动配置角色与回退链…";
+		this.#changed();
+		try {
+			const res = await onApply();
+			if (this.#closed) return;
+			if (res.ok || res.activeName !== undefined) {
+				this.#presets = this.#presets.map(entry => ({
+					name: entry.name,
+					active: entry.name === res.activeName,
+				}));
+			}
+			if (res.recommendationSummary !== undefined) {
+				this.#recommendationSummary = res.recommendationSummary;
+			}
+			this.#actionBanner = res.message;
+		} catch (error) {
+			this.#actionBanner = `智选路由应用失败: ${error instanceof Error ? error.message : String(error)}`;
+		} finally {
+			this.#switchingPreset = false;
+			if (!this.#closed) this.#changed();
+		}
+	}
+
 	#openDesktopHud(): void {
 		const onOpen = this.#options.onOpenDesktopHud;
 		if (!onOpen || this.#closed) return;
@@ -2355,6 +2420,9 @@ export class UsageDashboardComponent implements Component {
 						case "omp-overlay:refresh":
 							void this.#refresh();
 							return true;
+						case "omp-overlay:apply-recommendation":
+							void this.#applyRecommendation();
+							return true;
 						case "omp-overlay:toggle-polarity":
 							this.#togglePolarity();
 							return true;
@@ -2397,6 +2465,13 @@ export class UsageDashboardComponent implements Component {
 		}
 		if (matchesKey(data, "alt+q")) {
 			this.#close();
+			return;
+		}
+		if (
+			this.#options.onApplyRecommendation &&
+			(matchesKey(data, "a") || matchesKey(data, "shift+a") || data === "A")
+		) {
+			void this.#applyRecommendation();
 			return;
 		}
 		if (this.#options.onOpenDesktopHud && (matchesKey(data, "p") || matchesKey(data, "shift+p") || data === "P")) {

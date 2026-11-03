@@ -304,6 +304,22 @@ export type ExtensionApprovalAnswer =
 	| "deny"
 	| { grant: ExtensionApprovalGrant["scope"]; always: boolean };
 
+/** A synchronous operation on the main interactive composer's draft. */
+export interface ComposerOperation {
+	action: "read" | "set" | "append" | "clear" | "submit";
+	text?: string;
+	expectedText?: string;
+}
+
+export interface ComposerSnapshot {
+	text: string;
+	imageCount: number;
+	available: boolean;
+	blockedReason?: string;
+	/** Handed to the Enter pipeline; downstream command execution may still be pending. */
+	submitted?: boolean;
+}
+
 /**
  * UI context for extensions to request interactive UI.
  * Each mode (interactive, RPC, print) provides its own implementation.
@@ -415,6 +431,9 @@ export interface ExtensionUIContext {
 
 	/** Get the current text from the core input editor. */
 	getEditorText(): string;
+
+	/** Atomically read, edit, or submit the local main composer; absent on headless/remote hosts. */
+	controlEditor?(operation: ComposerOperation): ComposerSnapshot;
 
 	/** Show a multi-line editor for text editing. */
 	editor(

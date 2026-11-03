@@ -2891,6 +2891,9 @@ pub struct TodoItem {
 	pub details: Option<String>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub notes: Option<Vec<String>>,
+	/// Optional nested subtasks supporting multi-level decomposition.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub children: Option<Vec<TodoItem>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

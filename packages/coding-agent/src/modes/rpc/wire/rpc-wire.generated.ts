@@ -403,6 +403,8 @@ export interface TodoItem {
 	blocker?: string;
 	details?: string;
 	notes?: string[];
+	/** Optional nested subtasks supporting multi-level decomposition. */
+	children?: TodoItem[];
 }
 
 export interface TodoPhase {

@@ -36,6 +36,11 @@ import {
 	modelPresetSavedMessage,
 	saveModelPreset,
 } from "../../config/model-presets";
+import {
+	applyModelRecommendations,
+	probeMagpieGatewayUp,
+	recommendModelsForSession,
+} from "../../config/model-recommender";
 import { resolveAdvisorRoleSelection, resolveModelRoleValue } from "../../config/model-resolver";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { getRoleInfo } from "../../config/model-roles";
@@ -459,10 +464,37 @@ export class SelectorController {
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
+		let latestReports = reports;
+		const initialRecommendation = recommendModelsForSession({
+			models: this.ctx.session.getAvailableModels(),
+			reports: latestReports,
+			settings: this.ctx.settings,
+		});
 		const dashboard = new UsageDashboardComponent({
 			reports,
 			unavailableAccounts,
 			presets,
+			recommendationSummary: initialRecommendation.headline,
+			onApplyRecommendation: async () => {
+				const magpieGatewayUp = await probeMagpieGatewayUp();
+				const rec = recommendModelsForSession({
+					models: this.ctx.session.getAvailableModels(),
+					reports: latestReports,
+					settings: this.ctx.settings,
+					magpieGatewayUp,
+				});
+				const res = await applyModelRecommendations(this.ctx.settings, this.ctx.session, rec);
+				if (res.ok) {
+					this.ctx.statusLine.invalidate();
+					this.ctx.updateEditorBorderColor();
+				}
+				return {
+					ok: res.ok,
+					message: res.message,
+					activeName: res.activePresetName,
+					recommendationSummary: rec.headline,
+				};
+			},
 			onSwitchPreset: async name => {
 				const result = await applyModelPreset(this.ctx.settings, this.ctx.session, name);
 				const message = formatModelPresetSwitch(name, result);
@@ -507,10 +539,12 @@ export class SelectorController {
 			refresh: async () => {
 				const fresh = await this.ctx.session.fetchUsageReports();
 				if (fresh && fresh.length > 0) {
+					latestReports = fresh;
 					if (canUseDefaultFinopsUsageCache()) {
 						writeCachedFinopsUsageReports(fresh);
 					}
 					seedStatusLineQuotaPools(this.ctx.statusLine, fresh);
+					this.updateUsageDashboard(fresh);
 				}
 				return fresh;
 			},
@@ -534,7 +568,12 @@ export class SelectorController {
 			provider: account.provider,
 			label: accountIdentityLabel(account),
 		}));
-		open.component.updateReports(reports, unavailableAccounts);
+		const nextRec = recommendModelsForSession({
+			models: this.ctx.session.getAvailableModels(),
+			reports,
+			settings: this.ctx.settings,
+		});
+		open.component.updateReports(reports, unavailableAccounts, nextRec.headline);
 	}
 
 	showAdvisorConfigure(): void {

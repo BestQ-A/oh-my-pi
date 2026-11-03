@@ -51,6 +51,7 @@ import { BashTool } from "./bash";
 import { type BuiltinToolName, type HiddenToolName, normalizeToolNames } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, type CompletedRewindState, RewindTool } from "./checkpoint";
 import { ContextNotesTool, NewContextTool } from "./context-notes";
+import { ComposerTool } from "./composer";
 import { DebugTool } from "./debug";
 import { cfgIdaAvailable } from "../ida/install";
 import { EvalTool } from "./eval";
@@ -123,6 +124,7 @@ export type {
 } from "@oh-my-pi/pi-tui/tools/bash";
 export * from "./browser";
 export * from "./checkpoint";
+export * from "./composer";
 export * from "./computer";
 export * from "./computer/supervisor";
 export * from "./context-notes";
@@ -575,6 +577,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	ast_grep: s => new AstGrepTool(s),
 	ast_edit: s => new AstEditTool(s),
 	ask: AskTool.createIf,
+	composer: ComposerTool.createIf,
 	debug: DebugTool.createIf,
 	ida: IdaTool.createIf,
 	eval: s => new EvalTool(s),
@@ -772,6 +775,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		if (name === "security_scan") return cfgSecurityEnabled.get(session.settings);
 		if (name === "think") return externalThinkingActive;
 		if (name === "ask") return cfgAskEnabled.get(session.settings);
+		if (name === "composer") return session.tuiTranscript === true && (session.taskDepth ?? 0) === 0;
 		if (name === "context_notes" || name === "new_context")
 			return cfgCompactionExperimentalContextManagement.get(session.settings);
 		if (name === "checkpoint" || name === "rewind")

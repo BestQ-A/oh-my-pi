@@ -7,7 +7,7 @@ import { type Component, CURSOR_MARKER, padding, replaceTabs, truncateToWidth, v
 import { formatActionMarker } from "@oh-my-pi/pi-tui/render/extension-links";
 import type { QuotaPoolCapsule } from "@oh-my-pi/pi-tui/status-line";
 import { type ThemeColor, theme } from "@oh-my-pi/pi-tui/theme";
-import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { flattenTodoLeaves, type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 
 export interface MarginHudGitFile {
@@ -692,7 +692,7 @@ function collectTodoView(phases: readonly TodoPhase[]): {
 	let totalCount = 0;
 
 	for (const phase of phases) {
-		for (const task of phase.tasks) {
+		for (const task of flattenTodoLeaves(phase.tasks)) {
 			if (task.status === "abandoned") continue;
 			totalCount += 1;
 			if (task.status === "completed") {
@@ -797,6 +797,7 @@ export class ComposerMarginHudFrame implements Component {
 
 		const segments: HudSegment[] = [
 			{ text: presetPart, href: "omp-ui:quota", key: "top:preset" },
+			{ text: fg("success", " ⚡智选"), href: "omp-ui:quota-auto", key: "top:quota-auto" },
 			{ text: sep },
 			{ text: hwSection, href: "omp-ui:hud-refresh", key: "top:hw" },
 		];

@@ -36,6 +36,8 @@ export interface TodoItem {
 	blocker?: string;
 	details?: string;
 	notes?: string[];
+	/** Optional nested subtasks supporting arbitrary multi-level task decomposition. */
+	children?: TodoItem[];
 }
 
 /** A named group of todo tasks. */
@@ -123,14 +125,72 @@ export function isClosedTodo<T extends { status: TodoStatus }>(task: T): boolean
 	return task.status === "completed" || task.status === "abandoned";
 }
 
+/** True when `task` or any of its nested descendants satisfies `predicate`. */
+export function todoSubtreeSome(task: TodoItem, predicate: (node: TodoItem) => boolean): boolean {
+	if (predicate(task)) return true;
+	if (!task.children?.length) return false;
+	return task.children.some(child => todoSubtreeSome(child, predicate));
+}
+
+/** Flatten all leaf tasks (items without children) in depth-first order. */
+export function flattenTodoLeaves(tasks: readonly TodoItem[]): TodoItem[] {
+	const out: TodoItem[] = [];
+	const visit = (list: readonly TodoItem[]) => {
+		for (const item of list) {
+			if (item.children?.length) visit(item.children);
+			else out.push(item);
+		}
+	};
+	visit(tasks);
+	return out;
+}
+
+/** Flatten every task node (parents and children alike) in pre-order depth-first traversal. */
+export function flattenAllTodoItems(tasks: readonly TodoItem[]): TodoItem[] {
+	const out: TodoItem[] = [];
+	const visit = (list: readonly TodoItem[]) => {
+		for (const item of list) {
+			out.push(item);
+			if (item.children?.length) visit(item.children);
+		}
+	};
+	visit(tasks);
+	return out;
+}
+
+/** Count closed (`completed` | `abandoned`) and total leaf work units across a task forest. */
+export function countTodoLeaves(tasks: readonly TodoItem[]): { done: number; total: number } {
+	let done = 0;
+	let total = 0;
+	const visit = (list: readonly TodoItem[]) => {
+		for (const item of list) {
+			if (item.children?.length) {
+				visit(item.children);
+			} else {
+				total += 1;
+				if (isClosedTodo(item)) done += 1;
+			}
+		}
+	};
+	visit(tasks);
+	return { done, total };
+}
+
 /**
  * A todo the collapsed viewport treats as current work: the literal
  * `in_progress` task or a pending task a live subagent is executing. Both
  * collapsed views (transient tool result + sticky HUD) run this same policy so
  * they can never disagree about what the agent is doing (#5873).
  */
-function isActiveTodo<T extends { status: TodoStatus }>(task: T, isMatched: (task: T) => boolean): boolean {
-	return task.status === "in_progress" || (task.status === "pending" && isMatched(task));
+function isActiveTodo<T extends { status: TodoStatus; children?: T[] }>(
+	task: T,
+	isMatched: (task: T) => boolean,
+): boolean {
+	if (task.status === "in_progress" || (task.status === "pending" && isMatched(task))) return true;
+	if (task.children?.length) {
+		return task.children.some(child => isActiveTodo(child, isMatched));
+	}
+	return false;
 }
 
 /** Result of {@link selectCollapsedTodos}: the rows to render plus an optional
@@ -166,7 +226,7 @@ const COLLAPSED_CLOSED_CONTEXT = 1;
  * The summary occupies a row, so a summary that would hide exactly one task is
  * replaced by that task: the selection spends at most `cap + 1` rows.
  */
-function selectWithinCap<T extends { status: TodoStatus }>(
+function selectWithinCap<T extends { status: TodoStatus; children?: T[] }>(
 	base: T[],
 	isMatched: (task: T) => boolean,
 	cap: number,
@@ -212,7 +272,7 @@ function selectWithinCap<T extends { status: TodoStatus }>(
  * `summary` counts the open tasks that did not fit; the closed lead is context,
  * not part of the budget.
  */
-export function selectCollapsedTodos<T extends { status: TodoStatus }>(
+export function selectCollapsedTodos<T extends { status: TodoStatus; children?: T[] }>(
 	tasks: T[],
 	isMatched: (task: T) => boolean,
 	cap: number,
@@ -309,8 +369,12 @@ function forDisplay(text: string): string {
  * the name may carry provider or session text holding control sequences. The
  * raw `phase.name` stays the lookup key everywhere else.
  */
+const REDUNDANT_PHASE_PREFIX_RE = /^\s*(?:(?:phase|stage|step|阶段)\s*)?(?:\d+[.)、:：]\s*|[IVXLCDM]+\.\s+)/i;
+
 export function formatPhaseDisplayName(name: string, oneBasedIndex: number): string {
-	return `${phaseRomanNumeral(oneBasedIndex)}. ${forDisplay(name)}`;
+	const clean = forDisplay(name);
+	const stripped = clean.replace(REDUNDANT_PHASE_PREFIX_RE, "").trim();
+	return `${phaseRomanNumeral(oneBasedIndex)}. ${stripped || clean}`;
 }
 
 /** Frames held before revealing a completion strike. */
@@ -395,6 +459,66 @@ function formatTodoLine(
 }
 
 /**
+ * Render a multi-level `TodoItem[]` forest with themed box-drawing rails,
+ * per-parent `done/total` leaf rollup badges, and walking-viewport collapsing
+ * at every tree level.
+ */
+export function renderTodoItemsTree(options: {
+	tasks: TodoItem[];
+	uiTheme: Theme;
+	expanded: boolean;
+	cap: number;
+	isMatched: (task: TodoItem) => boolean;
+	renderLine: (task: TodoItem, matched: boolean, childProgressSuffix: string) => string;
+	shouldExpandChildren?: (task: TodoItem) => boolean;
+	itemType?: string;
+}): string[] {
+	const { tasks, uiTheme, expanded, cap, isMatched, renderLine, shouldExpandChildren, itemType = "todo" } = options;
+	const renderNode = (todo: TodoItem): string | string[] => {
+		const matched = isMatched(todo) || (todo.children?.some(c => todoSubtreeSome(c, isMatched)) ?? false);
+		const hasChildren = Boolean(todo.children?.length);
+		const childProgress = hasChildren
+			? (() => {
+					const stats = countTodoLeaves(todo.children!);
+					return uiTheme.fg("dim", ` · ${stats.done}/${stats.total}`);
+				})()
+			: "";
+		const head = renderLine(todo, matched, childProgress);
+		if (!hasChildren) return head;
+		const openChildren = expanded || (shouldExpandChildren ? shouldExpandChildren(todo) : !isClosedTodo(todo));
+		if (!openChildren) return head;
+		const childLines = renderTodoItemsTree({
+			...options,
+			tasks: todo.children!,
+			cap: Math.max(4, cap),
+		});
+		return childLines.length > 0 ? [head, ...childLines] : head;
+	};
+
+	if (expanded) {
+		return renderTreeList(
+			{
+				items: tasks,
+				expanded: true,
+				itemType,
+				renderItem: renderNode,
+			},
+			uiTheme,
+		);
+	}
+	const selection = selectCollapsedTodos(tasks, isMatched, cap);
+	return renderTreeList(
+		{
+			items: selection.items,
+			itemType,
+			trailingSummary: selection.summary,
+			renderItem: renderNode,
+		},
+		uiTheme,
+	);
+}
+
+/**
  * Phases the latest update touched, plus the active (in_progress) phase.
  * Returns `null` when there is no usable signal, meaning "render every phase
  * fully" — this preserves the legacy view and the manual-expand path.
@@ -408,7 +532,9 @@ function computeTouchedPhases(
 	// The phase holding the in_progress task is where attention sits after the
 	// auto-promotion that follows every completion.
 	for (const phase of phases) {
-		if (phase.tasks.some(task => task.status === "in_progress")) touched.add(phase.name);
+		if (phase.tasks.some(task => todoSubtreeSome(task, node => node.status === "in_progress"))) {
+			touched.add(phase.name);
+		}
 	}
 	// Phases with a task that just transitioned to completed in this update.
 	for (const transition of completedTasks) touched.add(transition.phase);
@@ -426,7 +552,7 @@ function computeTouchedPhases(
 			if (named) touched.add(named.name);
 		}
 		if (typeof op.task === "string" && op.task) {
-			const phase = phases.find(phase => phase.tasks.some(task => task.content === op.task));
+			const phase = phases.find(p => p.tasks.some(task => todoSubtreeSome(task, node => node.content === op.task)));
 			if (phase) touched.add(phase.name);
 		}
 	}
@@ -439,8 +565,8 @@ function computeTouchedPhases(
  * move the counter or its phase reads as permanently stuck.
  */
 function formatPhaseProgress(phase: TodoPhase, uiTheme: Theme): string {
-	const done = phase.tasks.filter(isClosedTodo).length;
-	return uiTheme.fg("dim", `  ${done}/${phase.tasks.length}`);
+	const { done, total } = countTodoLeaves(phase.tasks);
+	return uiTheme.fg("dim", `  ${done}/${total}`);
 }
 
 /** One-line summary for a collapsed (untouched) phase: dim header + progress. */
@@ -490,12 +616,25 @@ export function todoChecklistPhases(
 	phases: readonly { name: string; tasks: readonly TodoItem[] }[],
 	isMatched: (task: TodoItem) => boolean = () => false,
 ): TspChecklistPhase[] {
-	return phases.map((phase, p) => ({
-		id: `p${p}`,
-		title: forDisplay(phase.name),
-		items: phase.tasks.map((task, t) => checklistItem(task, `p${p}.${t}`, isMatched(task))),
-		collapsed: phase.tasks.length > 0 && phase.tasks.every(isClosedTodo),
-	}));
+	return phases.map((phase, p) => {
+		const items: TspChecklistItem[] = [];
+		const pushItems = (list: readonly TodoItem[], prefixId: string, depth: number) => {
+			list.forEach((task, idx) => {
+				const id = `${prefixId}.${idx}`;
+				const indent = depth > 0 ? `${"  ".repeat(depth)}↳ ` : "";
+				const base = checklistItem(task, id, isMatched(task));
+				items.push(depth > 0 ? { ...base, text: `${indent}${base.text}` } : base);
+				if (task.children?.length) pushItems(task.children, id, depth + 1);
+			});
+		};
+		pushItems(phase.tasks, `p${p}`, 0);
+		return {
+			id: `p${p}`,
+			title: forDisplay(phase.name),
+			items,
+			collapsed: phase.tasks.length > 0 && phase.tasks.every(isClosedTodo),
+		};
+	});
 }
 
 const todoResultMemo = new OwnerMemo<NativeToolView | undefined>();
@@ -517,11 +656,18 @@ function describeTodoResult(
 		};
 	}
 	const phases = (result.details?.phases ?? []).filter(phase => phase.tasks.length > 0);
-	const total = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
+	const totals = phases.reduce(
+		(acc, phase) => {
+			const c = countTodoLeaves(phase.tasks);
+			return { done: acc.done + c.done, total: acc.total + c.total };
+		},
+		{ done: 0, total: 0 },
+	);
+	const total = totals.total;
 	if (total === 0) {
 		return { tool: { title: "Todo" }, body: [noteText(forDisplay(resultText(result) || "No todos"))] };
 	}
-	const closed = phases.reduce((sum, phase) => sum + phase.tasks.filter(isClosedTodo).length, 0);
+	const closed = totals.done;
 	const activeDescs = options.expanded ? [] : activeTodoDescriptionsProvider();
 	const isMatched = (task: TodoItem): boolean =>
 		activeDescs.length > 0 && todoMatchesAnyDescription(task.content, activeDescs);
@@ -594,7 +740,7 @@ export const todoToolRenderer = {
 			}
 			keys.add(task.content);
 		}
-		const allTasks = phases.flatMap(phase => phase.tasks);
+		const allTasks = phases.flatMap(phase => flattenTodoLeaves(phase.tasks));
 		const header = renderStatusLine(
 			{
 				iconOverride: uiTheme.styledSymbol("tool.todo", "accent"),
@@ -693,38 +839,18 @@ export const todoToolRenderer = {
 				// Collapsed: walking viewport — the last closed task leads, then
 				// active work (in-progress / subagent-matched), then following
 				// pending tasks (#5873). Expanded: every task in order.
-				const treeLines = expanded
-					? renderTreeList(
-							{
-								items: phase.tasks,
-								expanded,
-								itemType: "todo",
-								renderItem: todo =>
-									formatTodoLine(todo, labelFor(todo), uiTheme, "", completionKeys, spinnerFrame),
-							},
-							uiTheme,
-						)
-					: (() => {
-							const selection = selectCollapsedTodos(phase.tasks, isMatched, PREVIEW_LIMITS.COLLAPSED_ITEMS);
-							return renderTreeList(
-								{
-									items: selection.items,
-									itemType: "todo",
-									trailingSummary: selection.summary,
-									renderItem: todo =>
-										formatTodoLine(
-											todo,
-											labelFor(todo),
-											uiTheme,
-											"",
-											completionKeys,
-											spinnerFrame,
-											isMatched(todo),
-										),
-								},
-								uiTheme,
-							);
-						})();
+				const treeLines = renderTodoItemsTree({
+					tasks: phase.tasks,
+					uiTheme,
+					expanded: Boolean(expanded),
+					cap: PREVIEW_LIMITS.COLLAPSED_ITEMS,
+					isMatched,
+					itemType: "todo",
+					shouldExpandChildren: todo =>
+						!isClosedTodo(todo) || todoSubtreeSome(todo, n => completionKeys.has(n.content)),
+					renderLine: (todo, matched, childProgressSuffix) =>
+						`${formatTodoLine(todo, labelFor(todo), uiTheme, "", completionKeys, spinnerFrame, matched)}${childProgressSuffix}`,
+				});
 				for (const line of treeLines) {
 					bodyLines.push(...(wrapTreeLine(`${indent}${line}`, contentWidth, uiTheme) ?? [`${indent}${line}`]));
 				}
