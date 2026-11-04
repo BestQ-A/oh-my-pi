@@ -183,7 +183,7 @@ describe("Editor empty-box numbered prediction action markers & acceptPrediction
 	it("marks each numbered option 1/2/3 separately for click hit-testing and accepts option 2 cleanly", () => {
 		const editor = new Editor(defaultEditorTheme);
 		editor.setPaddingX(0);
-		editor.prediction = () => "1. 提交当前改动  2. 查看 git diff  3. 继续优化补全延迟";
+		editor.predictions = () => ["1. 提交当前改动  2. 查看 git diff  3. 继续优化补全延迟"];
 
 		const lines = editor.render(100);
 		const inputRow = lines[1] ?? "";

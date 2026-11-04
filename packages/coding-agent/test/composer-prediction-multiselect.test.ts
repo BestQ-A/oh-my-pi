@@ -137,7 +137,7 @@ describe("InteractiveMode Multi-Select Bar + Tab Select-All + Additional Prompt 
 		});
 		term = new VirtualTerminal(160, 32);
 		const composer = new Composer({ terminal: term });
-		mode = new InteractiveMode(session, "test", undefined, () => {}, undefined, undefined, new EventBus(), composer);
+		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, new EventBus(), composer);
 		cfgTuiMouse.set(mode.settings, true);
 		cfgComposerMarginHud.set(mode.settings, true);
 	});

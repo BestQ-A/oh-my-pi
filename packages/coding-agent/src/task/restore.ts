@@ -22,7 +22,7 @@ import { hasRestorableTurn } from "../session/exit-diagnostics";
 import { extractSessionInit } from "../session/session-manager";
 import { collectSubSessions } from "../session/sub-sessions";
 import type { EventBus } from "../utils/event-bus";
-import { resolveMaxRuntimeMs, runSubagentFollowUpTurn } from "./executor";
+import { resolveMaxRuntimeMs, runSubagentFollowUpTurn, softRequestBudgetFor } from "./executor";
 import { persistedAgentDefinition } from "./persisted-revive";
 import { formatTaskResultSummary } from "./result-summary";
 import { cfgTaskAgentMaxRuntimeMs, cfgTaskMaxRuntimeMs } from "./settings";
@@ -104,6 +104,7 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 						cfgTaskMaxRuntimeMs.get(session.settings),
 						cfgTaskAgentMaxRuntimeMs.get(session.settings),
 					),
+					...softRequestBudgetFor(ref.displayName, session.settings),
 				});
 				const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
 				const structuredOutput = result.structuredOutput;

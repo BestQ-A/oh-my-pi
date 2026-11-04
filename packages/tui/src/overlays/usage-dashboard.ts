@@ -44,7 +44,7 @@ import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import type { TspSpan, TspTableColumn, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { col, elapsed, node, span, text } from "../native/describe";
 import { type DescribeContext, leafKey, type NativeChild, type NativeNode, type NativeUiEvent } from "../native/node";
-import { actionBar, actionButton } from "../native/overlay";
+import { actionBar, actionButton, segmentedTabs } from "../native/overlay";
 
 /** Local calendar-day activity consumed by the usage heatmap. */
 export interface DailyActivityPoint {
@@ -845,8 +845,8 @@ export interface UsageDashboardOptions {
 export function formatActivityErrorDetail(error: string, homeDir = os.homedir()): string {
 	let text = replaceTabs(sanitizeText(error)).replace(/\s+/g, " ").trim();
 	if (homeDir) {
-		const escaped = homeDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-		const forward = homeDir.replaceAll("\\", "/").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const escaped = RegExp.escape(homeDir);
+		const forward = RegExp.escape(homeDir.replaceAll("\\", "/"));
 		text = text.replace(new RegExp(`${escaped}|${forward}`, "gi"), "~");
 	}
 	return text.replace(/\.+$/, "");
@@ -1546,7 +1546,7 @@ export class UsageDashboardComponent implements Component {
 			: "";
 		const hint =
 			this.#view === "detail"
-				? `${scrollHint}${presetHint}${hudHint}${refreshHint}${formatActionMarker(`${cancel} back`, "omp-overlay:overview", "footer-overview")}`
+				? `${scrollHint}${presetHint}${hudHint}${refreshHint}${formatActionMarker(`${formatKeyHint("tab")} overview`, "omp-overlay:overview", "footer-overview")} · ${formatActionMarker(`${cancel} back`, "omp-overlay:overview", "footer-back")}`
 				: `${scrollHint}${presetHint}${hudHint}${refreshHint}${polarityHint}${formatActionMarker(`${formatKeyHint("enter")} details`, "omp-overlay:detail", "footer-detail")} · ${formatActionMarker(`${cancel} close`, "omp-overlay:close", "footer-close")}`;
 		this.#panel.title = title;
 		const headerParts: string[] = [];
@@ -1662,8 +1662,7 @@ export class UsageDashboardComponent implements Component {
 			);
 		}
 		const children: NativeChild[] = [
-			node(
-				"tabs",
+			segmentedTabs(
 				{
 					items: [
 						{ id: "overview", label: "Overview" },
@@ -1671,7 +1670,6 @@ export class UsageDashboardComponent implements Component {
 					],
 					active: this.#view,
 				},
-				undefined,
 				"tabs",
 			),
 			node("spacer", { grow: 1 }),
@@ -2486,10 +2484,11 @@ export class UsageDashboardComponent implements Component {
 				return;
 			}
 		}
-		if (
-			this.#view === "overview" &&
-			(matchesKey(data, "return") || matchesKey(data, "tab") || matchesKey(data, "d"))
-		) {
+		if (matchesKey(data, "tab")) {
+			this.#setView(this.#view === "overview" ? "detail" : "overview");
+			return;
+		}
+		if (this.#view === "overview" && (matchesKey(data, "return") || matchesKey(data, "d"))) {
 			this.#setView("detail");
 			return;
 		}

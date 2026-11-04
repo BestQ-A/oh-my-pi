@@ -72,6 +72,7 @@ import {
 export type { EditorBorderStyle, EditorTopBorder };
 
 import { type SelectItem, SelectList, type SelectListLayoutOptions, type SelectListTheme } from "./select-list";
+import { editorKey } from "../chrome/keybinding-hints";
 
 /** The TSP root an {@link Editor.describeLayout} hook builds around the `editor` node. */
 export interface NativeEditorLayout {
@@ -809,7 +810,8 @@ export function parseNumberedPredictionItems(prediction: string): NumberedPredic
 }
 
 interface ResolvedPredictionAction {
-	ghostSuffix: string;
+	index: number;
+	suffix: string;
 	fullAcceptText: string;
 	replaceLine: boolean;
 	chunkSourceText: string;
@@ -932,9 +934,19 @@ export class Editor implements Component, Focusable {
 	#autocompleteList?: SelectList;
 	#autocompleteState: "regular" | "force" | "assist" | null = null;
 	#textAssistReplacement:
-		| { line: number; startCol: number; endCol: number; original: string; cursorOffset: number }
+		| {
+				line: number;
+				startCol: number;
+				endCol: number;
+				original: string;
+				cursorOffset: number;
+				/** The list offers {@link predictions} for the whole line rather than spelling replacements. */
+				prediction?: boolean;
+		  }
 		| undefined;
 	#autocompletePrefix: string = "";
+	/** The line a prediction insert (Tab, Right, or the alternatives list) left in the buffer; any later edit clears it. */
+	#insertedPrediction: string | undefined;
 	/** False while the popup's untouched top row is a description-only slash hit ({@link AutocompleteItem.descriptionMatch}): Enter then submits the typed text. */
 	#enterAcceptsSelection = true;
 	#autocompleteRequestId: number = 0;
@@ -1017,12 +1029,6 @@ export class Editor implements Component, Focusable {
 	 *  cursor. The host styles it (ANSI allowed). Re-evaluated on every render, so hosts can derive
 	 *  it from live state. */
 	placeholder?: () => string | undefined;
-	/** Whole-message prediction for the next prompt, painted as ghost text after the cursor while
-	 *  the single-line buffer is a strict prefix of it, the cursor sits at its end, and no
-	 *  autocomplete is open. A shown prediction replaces the {@link placeholder}; Tab or Right inserts
-	 *  the rest without submitting. Must be a single line. Re-evaluated on every render, so hosts can
-	 *  derive it from live state. */
-	prediction?: () => string | undefined;
 	/** Cursor-suffix inline ghost-text completion for the current draft (single-line or multi-line),
 	 *  painted after the cursor while at end of the current line and no autocomplete is open.
 	 *  Single-line suffix only (any newline and trailing lines are stripped). */
@@ -1030,6 +1036,21 @@ export class Editor implements Component, Focusable {
 	/** Lifecycle callback invoked when a shown {@link inlineCompletion} is accepted, partially accepted,
 	 *  or explicitly dismissed. */
 	onInlineCompletionEvent?: (event: "accept" | "partial-accept" | "dismiss", text?: string) => void;
+	/** Whole-message predictions for the next prompt, most likely first. The first one the single-line
+	 *  buffer is a strict prefix of is painted as ghost text after the cursor while the cursor sits at
+	 *  its end and no autocomplete is open. A shown prediction replaces the {@link placeholder}; Tab or
+	 *  Right inserts the rest without submitting. A buffer the user typed keeps the ghost even when it
+	 *  equals a shorter prediction; once Tab, Right, or the list has inserted one of two or more
+	 *  predictions, no ghost extends it to a longer one, and Tab instead opens a list of all of them
+	 *  that swaps the whole line, also without submitting. Each must be a single line. Re-evaluated on
+	 *  every render, so hosts can derive them from live state. */
+	predictions?: () => readonly string[] | undefined;
+	/** Called with the prediction's index in {@link predictions} after Tab or Right inserts the rest of
+	 *  a shown prediction, or the alternatives list swaps a different one into the buffer. */
+	onPredictionAccepted?: (index: number) => void;
+	/** Called for each frame that paints a prediction as ghost text: a terminal frame that draws at
+	 *  least one cell of it, or a native frame that carries it as the editor's ghost. */
+	onPredictionShown?: () => void;
 
 	// Custom top border (for status line integration). Either an eager `content`
 	// (set once, reused every frame) or a `provider` that recomputes lazily just
@@ -1155,11 +1176,18 @@ export class Editor implements Component, Focusable {
 	acceptPredictionOption(index?: number): boolean {
 		if (index !== undefined) {
 			if (this.#autocompleteState) return false;
-			const items = parseNumberedPredictionItems(this.prediction?.() ?? "");
-			const picked = items?.find(it => it.index === index);
-			if (!picked) return false;
-			this.#replaceLineWithPrediction(picked.text);
-			return true;
+			const predictions = this.predictions?.();
+			if (!predictions) return false;
+			for (let predictionIndex = 0; predictionIndex < predictions.length; predictionIndex++) {
+				const items = parseNumberedPredictionItems(predictions[predictionIndex]!);
+				const picked = items?.find(it => it.index === index);
+				if (!picked) continue;
+				this.#replaceLineWithPrediction(picked.text);
+				this.#insertedPrediction = this.#state.lines[0];
+				this.onPredictionAccepted?.(predictionIndex);
+				return true;
+			}
+			return false;
 		}
 		return this.#acceptPrediction() || this.#acceptInlineCompletion() || this.#acceptWordCompletion({ space: true });
 	}
@@ -1707,6 +1735,10 @@ export class Editor implements Component, Focusable {
 		// against the cursor, or the placeholder flush right.
 		const placeholder = this.#getPlaceholder();
 		const inlineHint = placeholder ? null : this.#getInlineHint();
+		// Whether the hint is the prediction, and how many of its cells this frame draws: a full row,
+		// an unfocused hardware-cursor row, or the IME-safe layout can leave it unpainted.
+		const hintIsPrediction = inlineHint !== null && inlineHint === this.#getPredictionSuffix();
+		let hintCellsPainted = 0;
 		const hintStyle = this.#theme.hintStyle ?? ((t: string) => `\x1b[2m${t}\x1b[0m`);
 		const hintTail = (avail: number): { text: string; width: number } | undefined => {
 			if (placeholder) {
@@ -1720,7 +1752,8 @@ export class Editor implements Component, Focusable {
 				this.#state.lines.length === 1 &&
 				(this.#state.lines[0] ?? "") === ""
 			) {
-				const pred = this.prediction?.();
+				const shown = this.#getShownPrediction();
+				const pred = shown ? this.predictions?.()?.[shown.index] : undefined;
 				const items = pred ? parseNumberedPredictionItems(pred) : null;
 				if (items) {
 					const parts: string[] = [];
@@ -1856,6 +1889,7 @@ export class Editor implements Component, Focusable {
 					} else if (tail) {
 						displayText = before + marker + tail.text;
 						displayWidth += tail.width;
+						hintCellsPainted += tail.width;
 					} else if (after.length === 0 && !isSideBordered && displayWidth >= lineContentWidth) {
 						displayText = this.#renderTerminalCursorMarker(before, marker, lineContentWidth);
 					} else {
@@ -1902,6 +1936,7 @@ export class Editor implements Component, Focusable {
 						const tail = hintTail(Math.max(0, lineContentWidth - displayWidth - overrideWidth));
 						displayText = before + marker + this.cursorOverride + (tail?.text ?? "");
 						displayWidth += overrideWidth + (tail?.width ?? 0);
+						hintCellsPainted += tail?.width ?? 0;
 					}
 				} else {
 					// Cursor is at the end - add thin cursor glyph
@@ -1916,6 +1951,7 @@ export class Editor implements Component, Focusable {
 						const tail = hintTail(Math.max(0, lineContentWidth - displayWidth - cursorWidth));
 						displayText = before + marker + cursor + (tail?.text ?? "");
 						displayWidth += cursorWidth + (tail?.width ?? 0);
+						hintCellsPainted += tail?.width ?? 0;
 					}
 					if (displayWidth > lineContentWidth && paddingX > 0) {
 						cursorPaddingOverflow = displayWidth - lineContentWidth;
@@ -1958,6 +1994,7 @@ export class Editor implements Component, Focusable {
 				}),
 			);
 		}
+		if (hintIsPrediction && hintCellsPainted > 0) this.onPredictionShown?.();
 
 		const bottomRow = style.renderBottom(chromeCtx);
 		if (bottomRow !== undefined) result.push(bottomRow);
@@ -2023,6 +2060,7 @@ export class Editor implements Component, Focusable {
 				: placeholder && plainText(placeholder).trim();
 		const atLineEnd = cursorCol >= (lines[cursorLine]?.length ?? 0);
 		const ghost = nativePlaceholder || !atLineEnd ? null : this.#getInlineHint();
+		if (ghost && ghost === this.#getPredictionSuffix()) this.onPredictionShown?.();
 		const vim = this.#vim;
 		let anchor: number | null = null;
 		if (vim?.visual && vim.anchor !== null) {
@@ -2274,7 +2312,7 @@ export class Editor implements Component, Focusable {
 					kb.matchesCanonical(canonical, "tui.input.tab") ||
 					rightArrowAccepts)
 			) {
-				this.#applySpellingSuggestion();
+				this.#applyAssistReplacement();
 				return;
 			}
 			// Let the autocomplete list handle navigation and selection
@@ -3411,6 +3449,7 @@ export class Editor implements Component, Focusable {
 
 	#notifyChange(text?: string): void {
 		this.#textRevision++;
+		this.#insertedPrediction = undefined;
 		this.onChange?.(text ?? this.getText());
 	}
 
@@ -3906,6 +3945,11 @@ export class Editor implements Component, Focusable {
 			}
 			// Auto-trigger for "#" prompt actions anywhere in the current token
 			else if (char === "#") {
+				this.#tryTriggerAutocomplete();
+			} else if (
+				char === ":" &&
+				MENTION_CONTEXT_RE.test((this.#state.lines[this.#state.cursorLine] || "").slice(0, this.#state.cursorCol))
+			) {
 				this.#tryTriggerAutocomplete();
 			}
 			// Argument providers may expose candidates only after a separator.
@@ -5228,7 +5272,7 @@ export class Editor implements Component, Focusable {
 		// A pointer pick on the popup (TSP `select`/`activate`) accepts it like Tab.
 		list.onSelect = item => {
 			if (this.#autocompleteList !== list) return;
-			if (this.#autocompleteState === "assist") this.#applySpellingSuggestion();
+			if (this.#autocompleteState === "assist") this.#applyAssistReplacement();
 			else this.#acceptAutocompleteSelection(item);
 		};
 		return list;
@@ -5236,6 +5280,7 @@ export class Editor implements Component, Focusable {
 
 	async #handleTabCompletion(): Promise<void> {
 		if (this.#acceptPrediction()) return;
+		if (this.#showPredictionAlternatives()) return;
 		if (this.#acceptInlineCompletion()) return;
 		if (this.#acceptWordCompletion({ space: true })) return;
 
@@ -5289,15 +5334,17 @@ export class Editor implements Component, Focusable {
 		this.#setCursorCol(newText.length);
 		this.#notifyChange();
 	}
-	/** Insert or select the shown {@link prediction}, if any. Never submits. */
+	/** Insert or select the shown prediction, if any. Never submits. */
 	#acceptPrediction(): boolean {
-		const action = this.#resolvePredictionAction();
+		const action = this.#getShownPrediction();
 		if (!action) return false;
 		if (action.replaceLine) {
 			this.#replaceLineWithPrediction(action.fullAcceptText);
 		} else {
 			this.#insertTextAtCursor(action.fullAcceptText);
 		}
+		this.#insertedPrediction = this.#state.lines[0];
+		this.onPredictionAccepted?.(action.index);
 		return true;
 	}
 	/** Insert the shown {@link inlineCompletion} suffix at the cursor, if any. Never submits. */
@@ -5308,11 +5355,35 @@ export class Editor implements Component, Focusable {
 		this.#insertTextAtCursor(suffix);
 		return true;
 	}
+
+	/** Open the list of every prediction over a buffer that equals one of them, that one selected. */
+	#showPredictionAlternatives(): boolean {
+		const alternatives = this.#getPredictionAlternatives();
+		if (!alternatives) return false;
+		const original = this.#state.lines[0] ?? "";
+		this.#autocompletePrefix = original;
+		this.#autocompleteList = this.#createAutocompleteList(
+			"",
+			alternatives.choices.map(value => ({ value, label: value })),
+		);
+		this.#autocompleteList.setSelectedIndex(alternatives.index);
+		this.#autocompleteState = "assist";
+		this.#textAssistReplacement = {
+			line: 0,
+			startCol: 0,
+			endCol: original.length,
+			original,
+			cursorOffset: 0,
+			prediction: true,
+		};
+		this.onAutocompleteUpdate?.();
+		return true;
+	}
 	/** Accept one chunk of the active ghost prediction, inline completion, or word completion. */
 	#acceptNextGhostChunk(): boolean {
 		if (this.#autocompleteState) return false;
 
-		const predAction = this.#resolvePredictionAction();
+		const predAction = this.#getShownPrediction();
 		if (predAction) {
 			const chunk = nextGhostCompletionChunk(predAction.chunkSourceText);
 			if (!chunk) return false;
@@ -5320,6 +5391,10 @@ export class Editor implements Component, Focusable {
 				this.#replaceLineWithPrediction(chunk);
 			} else {
 				this.#insertTextAtCursor(chunk);
+			}
+			if (chunk === predAction.fullAcceptText) {
+				this.#insertedPrediction = this.#state.lines[0];
+				this.onPredictionAccepted?.(predAction.index);
 			}
 			return true;
 		}
@@ -5386,7 +5461,7 @@ export class Editor implements Component, Focusable {
 		this.onAutocompleteUpdate?.();
 	}
 
-	#applySpellingSuggestion(): void {
+	#applyAssistReplacement(): void {
 		const replacement = this.#textAssistReplacement;
 		const selected = this.#autocompleteList?.getSelectedItem();
 		if (!replacement || !selected) {
@@ -5394,8 +5469,13 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 		const line = this.#state.lines[replacement.line] ?? "";
-		if (line.slice(replacement.startCol, replacement.endCol) !== replacement.original) {
+		// A mismatch means the list went stale; picking the prediction already in the buffer changes nothing.
+		if (
+			line.slice(replacement.startCol, replacement.endCol) !== replacement.original ||
+			(replacement.prediction && selected.value === replacement.original)
+		) {
 			this.#cancelAutocomplete();
+			this.onAutocompleteUpdate?.();
 			return;
 		}
 		this.#recordUndoState();
@@ -5407,6 +5487,11 @@ export class Editor implements Component, Focusable {
 		this.#cancelAutocomplete();
 		this.onAutocompleteUpdate?.();
 		this.#notifyChange();
+		if (replacement.prediction) {
+			this.#insertedPrediction = selected.value;
+			const index = this.predictions?.()?.indexOf(selected.value) ?? -1;
+			if (index >= 0) this.onPredictionAccepted?.(index);
+		}
 	}
 	async #handleSlashCommandCompletion(): Promise<void> {
 		await this.#tryTriggerAutocomplete();
@@ -5576,7 +5661,7 @@ export class Editor implements Component, Focusable {
 	 */
 	#refreshAutocomplete(): void {
 		if (this.#autocompleteState === "assist") return;
-		if (this.#refreshSlashCommandListSync()) return;
+		if (this.#refreshSlashCommandListSync() || this.#refreshModelMentionListSync()) return;
 		this.#narrowAtFileList();
 		void this.#updateAutocomplete();
 	}
@@ -5610,9 +5695,29 @@ export class Editor implements Component, Focusable {
 		return true;
 	}
 
+	#refreshModelMentionListSync(): boolean {
+		const provider = this.#autocompleteProvider;
+		if (this.#autocompleteState !== "regular" || !provider?.trySyncModelMentionCompletion) return false;
+		const completion = provider.trySyncModelMentionCompletion(
+			this.#state.lines,
+			this.#state.cursorLine,
+			this.#state.cursorCol,
+		);
+		if (completion.kind === "unhandled") return false;
+		this.#invalidateAutocompleteRequests();
+		if (completion.kind === "matched") {
+			this.#showAutocompleteSuggestions(completion.suggestions, "regular");
+		} else {
+			this.#cancelAutocomplete();
+			this.onAutocompleteUpdate?.();
+		}
+		return true;
+	}
+
 	/**
 	 * Get inline hint text to show as dim ghost text after the cursor.
-	 * Checks the selected autocomplete item's hint first, then prediction, inline completion, and provider.
+	 * Checks the selected autocomplete item's hint first, then the prediction and its alternatives,
+	 * inline completion, and the provider.
 	 */
 	#getInlineHint(): string | null {
 		// Check selected autocomplete item for a hint
@@ -5623,7 +5728,12 @@ export class Editor implements Component, Focusable {
 
 		const prediction = this.#getPredictionSuffix();
 		if (prediction) return prediction;
-
+		const alternatives = this.#getPredictionAlternatives();
+		if (alternatives) {
+			// Tab opens the alternatives list from here; without a bound key there is nothing to hint.
+			const tab = editorKey("tui.input.tab");
+			if (tab) return ` ${tab} ${alternatives.choices.length - 1} more`;
+		}
 		const inline = this.#getInlineCompletionSuffix();
 		if (inline) return inline;
 
@@ -5661,55 +5771,83 @@ export class Editor implements Component, Focusable {
 		const suffix = newlineIdx === -1 ? raw : raw.slice(0, newlineIdx);
 		return suffix.length > 0 ? suffix : null;
 	}
-	#resolvePredictionAction(): ResolvedPredictionAction | null {
+	/** The part of the shown prediction not yet typed, or `null` when no prediction is shown. */
+	#getPredictionSuffix(): string | null {
+		return this.#getShownPrediction()?.suffix ?? null;
+	}
+	/**
+	 * The prediction painted as ghost text: the first one the single-line buffer is a strict prefix of,
+	 * with the cursor at its end and no autocomplete open. None while the buffer is a prediction insert
+	 * that equals one of two or more predictions, so Tab opens their list rather than extending to a
+	 * longer one; a buffer the user typed keeps its ghost.
+	 */
+	#getShownPrediction(): ResolvedPredictionAction | null {
 		if (this.#autocompleteState) return null;
-		const prediction = this.prediction?.();
-		if (!prediction) return null;
+		const predictions = this.predictions?.();
+		if (!predictions?.length) return null;
 		const { lines, cursorCol } = this.#state;
 		if (lines.length !== 1) return null;
 		const typed = lines[0] ?? "";
 		if (cursorCol !== typed.length) return null;
-
-		const items = parseNumberedPredictionItems(prediction);
-		if (items) {
-			if (typed.length === 0) {
-				const menu = items.map(it => `${it.index}. ${it.text}`).join("  ");
-				const first = items[0]!.text;
-				const selectAllText =
-					items.length === 1 ? first : items.map((it, idx) => `${idx + 1}. ${it.text}`).join("\n");
-				return { ghostSuffix: menu, fullAcceptText: selectAllText, replaceLine: false, chunkSourceText: first };
-			}
-			const digitMatch = DIGIT_SELECTOR_RE.exec(typed);
-			if (digitMatch) {
-				const idx = Number(digitMatch[1]);
-				const picked = items.find(it => it.index === idx);
-				if (picked) {
-					const trailing = digitMatch[2] ?? "";
-					const sep = trailing ? (/\s$/.test(trailing) ? "" : " ") : ". ";
+		if (predictions.length > 1 && typed === this.#insertedPrediction && predictions.includes(typed)) return null;
+		for (let index = 0; index < predictions.length; index++) {
+			const prediction = predictions[index]!;
+			const items = parseNumberedPredictionItems(prediction);
+			if (items) {
+				if (typed.length === 0) {
+					const menu = items.map(it => `${it.index}. ${it.text}`).join("  ");
+					const first = items[0]!.text;
+					const selectAllText = items.map((it, idx) => `${idx + 1}. ${it.text}`).join("\n");
 					return {
-						ghostSuffix: `${sep}${picked.text}`,
-						fullAcceptText: picked.text,
-						replaceLine: true,
-						chunkSourceText: picked.text,
+						index,
+						suffix: menu,
+						fullAcceptText: selectAllText,
+						replaceLine: false,
+						chunkSourceText: first,
 					};
 				}
+				const digitMatch = DIGIT_SELECTOR_RE.exec(typed);
+				if (digitMatch) {
+					const picked = items.find(it => it.index === Number(digitMatch[1]));
+					if (picked) {
+						const trailing = digitMatch[2] ?? "";
+						const sep = trailing ? (/\s$/.test(trailing) ? "" : " ") : ". ";
+						return {
+							index,
+							suffix: `${sep}${picked.text}`,
+							fullAcceptText: picked.text,
+							replaceLine: true,
+							chunkSourceText: picked.text,
+						};
+					}
+				}
+				const prefixMatched = items.find(it => typed.length < it.text.length && it.text.startsWith(typed));
+				if (prefixMatched) {
+					const suffix = prefixMatched.text.slice(typed.length);
+					return { index, suffix, fullAcceptText: suffix, replaceLine: false, chunkSourceText: suffix };
+				}
 			}
-			const prefixMatched = items.find(it => typed.length < it.text.length && it.text.startsWith(typed));
-			if (prefixMatched) {
-				const rem = prefixMatched.text.slice(typed.length);
-				return { ghostSuffix: rem, fullAcceptText: rem, replaceLine: false, chunkSourceText: rem };
+			if (typed.length < prediction.length && prediction.startsWith(typed)) {
+				const suffix = prediction.slice(typed.length);
+				return { index, suffix, fullAcceptText: suffix, replaceLine: false, chunkSourceText: suffix };
 			}
 		}
-
-		if (typed.length >= prediction.length || !prediction.startsWith(typed)) {
-			return null;
-		}
-		const rem = prediction.slice(typed.length);
-		return { ghostSuffix: rem, fullAcceptText: rem, replaceLine: false, chunkSourceText: rem };
+		return null;
 	}
-	/** The part of {@link prediction} not yet typed, or `null` when no prediction is shown. */
-	#getPredictionSuffix(): string | null {
-		return this.#resolvePredictionAction()?.ghostSuffix ?? null;
+	/**
+	 * Two or more predictions, and which one the single-line buffer equals with the cursor at its end:
+	 * Tab then opens the list of all of them.
+	 */
+	#getPredictionAlternatives(): { choices: readonly string[]; index: number } | null {
+		if (this.#autocompleteState) return null;
+		const choices = this.predictions?.();
+		if (!choices || choices.length < 2) return null;
+		const { lines, cursorCol } = this.#state;
+		if (lines.length !== 1) return null;
+		const typed = lines[0] ?? "";
+		if (cursorCol !== typed.length) return null;
+		const index = choices.indexOf(typed);
+		return index < 0 ? null : { choices, index };
 	}
 	/** Typing `typed` where it diverges from the shown ghost completion rejects that ghost. */
 	#reportTypedPastWordCompletion(typed: string): void {

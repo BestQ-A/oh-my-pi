@@ -6,7 +6,7 @@
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 
-import type { AsyncJob, AsyncJobDetails, AsyncJobManager, AsyncJobType } from "./job-manager";
+import type { AsyncJob, AsyncJobDetails, AsyncJobManagerApi, AsyncJobType } from "./job-manager";
 
 import { renderStructuredJson, structuredStatusLabel, taskAgentHandles } from "../session/async-job-delivery";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
@@ -35,7 +35,7 @@ import { isWaitingPollDetails } from "@oh-my-pi/pi-tui/tools/wait";
  * Drops missing ids and ids owned by other agents, preventing cross-agent inspection.
  * An unowned caller (`ownerId` undefined) sees only unowned jobs.
  */
-export function visibleJobs(manager: AsyncJobManager, ids: string[], ownerId: string | undefined): AsyncJob[] {
+export function visibleJobs(manager: AsyncJobManagerApi, ids: string[], ownerId: string | undefined): AsyncJob[] {
 	const out: AsyncJob[] = [];
 	for (const id of ids) {
 		const job = manager.getJob(id);
@@ -52,7 +52,7 @@ export function visibleJobs(manager: AsyncJobManager, ids: string[], ownerId: st
  * dead-lettered, or skipped while a `wait` watched it. Consumed, acknowledged,
  * and currently watched results are excluded.
  */
-export function undeliveredJobs(manager: AsyncJobManager, ownerId: string | undefined): AsyncJob[] {
+export function undeliveredJobs(manager: AsyncJobManagerApi, ownerId: string | undefined): AsyncJob[] {
 	return manager
 		.getAllJobs({ ownerId })
 		.filter(
@@ -154,6 +154,8 @@ interface TrackedJobLike {
 	type: AsyncJobType;
 	status: string;
 	label: string;
+	/** See {@link AsyncJob.intent}. */
+	intent?: string;
 	startTime: number;
 	endTime?: number;
 	latestDetails?: AsyncJobDetails;
@@ -242,6 +244,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			type: latest.type,
 			status: latest.status as JobSnapshot["status"],
 			label: latest.label,
+			...(latest.intent ? { intent: latest.intent } : {}),
 			durationMs: Math.max(0, (latest.endTime ?? now) - latest.startTime),
 			...(exitCode !== undefined ? { exitCode } : {}),
 			...(resolvedModel ? { resolvedModel } : {}),
@@ -300,7 +303,7 @@ export function runningTaskProgressSuffix(job: JobSnapshot, options: { duration:
 
 export function buildJobResult(
 	session: ToolSession,
-	manager: AsyncJobManager,
+	manager: AsyncJobManagerApi,
 	op: "wait" | "cancel",
 	jobs: TrackedJobLike[],
 	cancelOutcomes: CancelOutcome[],
@@ -340,6 +343,7 @@ export function buildJobResult(
 		lines.push(`## Completed (${completed.length})\n`);
 		for (const j of completed) {
 			lines.push(`### ${j.id} [${j.type}] — ${j.status}`);
+			if (j.intent) lines.push(`Intent: ${j.intent}`);
 			lines.push(`Label: ${j.label}`);
 			const handles = taskAgentHandles(j.id, j, j.agentUrlId);
 			if (handles) {
@@ -387,7 +391,10 @@ export function buildJobResult(
 	if (running.length > 0) {
 		lines.push(`## Still Running (${running.length})\n`);
 		for (const j of running) {
-			lines.push(`- \`${j.id}\` [${j.type}] — ${j.label}${runningTaskProgressSuffix(j, { duration: true })}`);
+			const intent = j.intent ? `${j.intent} — ` : "";
+			lines.push(
+				`- \`${j.id}\` [${j.type}] — ${intent}${j.label}${runningTaskProgressSuffix(j, { duration: true })}`,
+			);
 		}
 	}
 
@@ -423,7 +430,7 @@ export function buildJobResult(
 /** `cancel`: kill the named jobs; returns immediately with outcomes + snapshots. */
 export async function executeCancel(
 	session: ToolSession,
-	manager: AsyncJobManager,
+	manager: AsyncJobManagerApi,
 	ownerId: string | undefined,
 	ids: string[],
 ): Promise<AgentToolResult<CoordinationDetails>> {

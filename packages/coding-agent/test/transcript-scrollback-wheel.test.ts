@@ -42,7 +42,7 @@ describe("Mouse wheel scrollback under tui.mouse: true", () => {
 		});
 		term = new VirtualTerminal(120, 24);
 		const composer = new Composer({ terminal: term });
-		mode = new InteractiveMode(session, "test", undefined, () => {}, undefined, undefined, new EventBus(), composer);
+		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, new EventBus(), composer);
 		cfgTuiMouse.set(mode.settings, true);
 	});
 

@@ -3,6 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
 	applyModelRecommendations,
 	evaluateModelPoolHealth,
@@ -29,8 +31,10 @@ function makeModel(overrides: Partial<Model<Api>> & { provider: string; id: stri
 		contextWindow: overrides.contextWindow ?? 262_000,
 		maxTokens: overrides.maxTokens ?? 64_000,
 		reasoning: overrides.reasoning ?? true,
-		thinking: overrides.thinking ?? { mode: "effort", efforts: ["low", "medium", "high"] },
+		thinking: overrides.thinking ?? { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] },
 		cost: overrides.cost ?? { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 0 },
+		compat: overrides.compat,
+		identity: overrides.identity ?? classifyModel(overrides.provider, overrides.id, { lenient: true }),
 	};
 }
 
@@ -174,10 +178,10 @@ describe("model-recommender: pool health + capability scoring", () => {
 		});
 
 		// google-antigravity/gemini-4-argon has 87% remaining in a 5h window resetting in 3h (salvage + frontier)
-		expect(rec.roles.default.primary.selector).toBe("google-antigravity/gemini-4-argon");
-		expect(rec.roles.slow.primary.selector).toBe("google-antigravity/gemini-4-argon");
-		expect(rec.roles.plan.primary.selector).toBe("google-antigravity/gemini-4-argon");
-		expect(rec.roles.vision.primary.selector).toBe("google-antigravity/gemini-4-argon");
+		expect(rec.roles.default.primary?.selector).toBe("google-antigravity/gemini-4-argon");
+		expect(rec.roles.slow.primary?.selector).toBe("google-antigravity/gemini-4-argon");
+		expect(rec.roles.plan.primary?.selector).toBe("google-antigravity/gemini-4-argon");
+		expect(rec.roles.vision.primary?.selector).toBe("google-antigravity/gemini-4-argon");
 
 		// Exhausted models must never appear in fallbacks
 		const defaultFallbackSelectors = rec.roles.default.fallbacks.map(f => f.selector);
@@ -186,12 +190,13 @@ describe("model-recommender: pool health + capability scoring", () => {
 		expect(defaultFallbackSelectors).toContain("devin/gemini-4-argon");
 
 		// Advisor diversifies away from default's provider when another frontier pool is healthy
-		expect(rec.roles.advisor.primary.model.provider).not.toBe("google-antigravity");
+		expect(rec.roles.advisor.primary?.model.provider).not.toBe("google-antigravity");
 
 		let switchedTo: string | undefined;
 		const sessionMock = {
 			setModel: async (model: Model) => {
 				switchedTo = `${model.provider}/${model.id}`;
+				return { switched: true };
 			},
 			setThinkingLevel: () => {},
 			getAvailableModels: () => models,
@@ -308,7 +313,7 @@ describe("model-recommender: pool health + capability scoring", () => {
 		const applyRes = await applyModelRecommendations(
 			settings,
 			{
-				setModel: async () => {},
+				setModel: async () => ({ switched: true }),
 				setThinkingLevel: () => {},
 				getAvailableModels: () => [],
 				scopedModels: [],

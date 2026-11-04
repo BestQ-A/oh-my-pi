@@ -47,7 +47,7 @@ import {
 	jobWidgetSummary,
 	latestJobWidget,
 } from "@oh-my-pi/pi-tui/tools/job-widget";
-import type { AsyncJobManager } from "../async/job-manager";
+import type { AsyncJobManagerApi } from "../async/job-manager";
 import type { JobWidgetRegistry } from "../job-widgets/types";
 import { sameItems } from "@oh-my-pi/pi-tui/native/memo";
 import { describeSegmentTrack, renderSegmentTrack, type TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
@@ -80,13 +80,15 @@ import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey, rawKeyHint } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { findActiveModelPreset } from "../config/model-presets";
-import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
+import { formatModelString, type ResolvedModelRoleValue, resolveModelRoleValue } from "../config/model-resolver";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import type {
+	AssistantTextRenderer,
 	AutocompleteProviderFactory,
 	ContextUsage,
 	ExtensionCustomOptions,
+	ExtensionRunner,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionUISelectItem,
@@ -147,6 +149,7 @@ import {
 	type ResolvedRoleModel,
 	SHUTDOWN_CONSOLIDATE_BUDGET_MS,
 } from "../session/agent-session";
+import type { AgentViewSession } from "../session/agent-session-handle";
 import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import { HistoryStorage } from "../session/history-storage";
@@ -155,10 +158,10 @@ import { setWordPredictionHost } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveMarkdownLinkHrefs } from "../internal-urls/hyperlink-targets";
 import type { ResolveContext } from "../internal-urls/index";
-import { modelMentionDisplayName } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
 import { modelMentionChipLabel, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
-import type { SessionContext } from "../session/session-context";
+import { isTranscriptEntry, type SessionContext } from "../session/session-context";
 import type { SessionManager } from "../session/session-manager";
+import { loadPinnedSessionIds } from "../session/session-pins";
 import {
 	canAutoCreateWorktree,
 	planWorktreeExit,
@@ -176,7 +179,14 @@ import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { labelEchoesHandle } from "../task/label";
 import { agentTypeBadge, formatTaskId } from "@oh-my-pi/pi-tui/tools/task";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
+import {
+	AUTO_THINKING,
+	type ConfiguredThinkingLevel,
+	newSessionThinkingLevel,
+	parseConfiguredThinkingLevel,
+	resolveConfiguredThinkingLevel,
+} from "@oh-my-pi/pi-tui/thinking";
 import { isMCPToolName } from "../tools/builtin-names";
 import type { LspStartupServerInfo } from "../tools";
 import { resolvePlanFilePath } from "../plan-mode/plan-files";
@@ -188,6 +198,7 @@ import {
 	FEED_MODEL_BADGE_WIDTH,
 	formatFeedModelBadge,
 	formatMoreItems,
+	formatStatusIcon,
 	isFeedModelBadgeEnabled,
 	previewLine,
 	replaceTabs,
@@ -205,7 +216,6 @@ import {
 	nextActionableTask,
 	reconcileTodoPhasesWithCompletedDescriptions,
 	TODO_HUD_STATE_CUSTOM_TYPE,
-	USER_TODO_EDIT_CUSTOM_TYPE,
 	type TodoHudStateEntryData,
 } from "../tools/todo";
 import {
@@ -259,6 +269,7 @@ import {
 	setSessionTerminalTitle,
 	setTerminalSessionSource,
 	setTerminalTitlePullRequest,
+	setTerminalTitleSpinnerInterval,
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleStateEnabled,
 } from "../utils/title-generator";
@@ -282,6 +293,7 @@ import { CodexResetFireworksController } from "@oh-my-pi/pi-tui/overlays/codex-r
 import { type ComposerNativeState, CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
 import { EditorTopGap } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
+import type { VersionUpdate } from "@oh-my-pi/pi-tui/prompt/welcome";
 import { ErrorBannerComponent } from "@oh-my-pi/pi-tui/overlays/error-banner";
 import type { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
 import type { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
@@ -292,6 +304,9 @@ import { PlanSaveOverlay, type PlanSaveOverlayResult } from "@oh-my-pi/pi-tui/ov
 import { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
 import { SessionInfoOverlay } from "@oh-my-pi/pi-tui/overlays/session-info-overlay";
 import { JobsSheet } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
+import { hasSpotlightOriginal, SpotlightSheet } from "@oh-my-pi/pi-tui/overlays/spotlight-sheet";
+import type { SpotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
+import { readArtifactText } from "../spotlight/sink";
 import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StatusLineComponent, summarizeQuotaPoolCapsules } from "@oh-my-pi/pi-tui/status-line";
 import { statusLineHost } from "./status-line-host";
@@ -299,6 +314,9 @@ import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "@oh-my-pi/pi-
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { Composer, type ComposerPreferences, type ComposerStatusCache } from "@oh-my-pi/pi-tui/prompt/composer";
 import { PINNED_HUD_TOGGLE_ID } from "../task/output-manager";
+import { isUserRequestEntry, type TranscriptEntryLike } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import { LinkBrowserComponent, type LinkBrowserDeps } from "@oh-my-pi/pi-tui/overlays/link-browser";
+import { getAssistantMessageLinkTargets } from "@oh-my-pi/pi-tui/prompt/interactive-context-helpers";
 import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { MAGIC_KEYWORDS } from "./magic-keywords";
 import { sharedComposerCache } from "@oh-my-pi/pi-tui/prompt/composer-cache";
@@ -387,6 +405,7 @@ import {
 	cfgAutocompleteMaxVisible,
 	cfgComposerInlineCompletions,
 	cfgComposerMarginHud,
+	cfgComposerPredictionAlternatives,
 	cfgComposerPredictions,
 	cfgComposerShape,
 	cfgComposerTokenRate,
@@ -435,6 +454,7 @@ import {
 	cfgTuiTextSizing,
 	cfgTuiTight,
 	cfgTuiTitleSpinner,
+	cfgMotionResolved,
 	cfgTuiTitleState,
 	cfgTuiVimMode,
 	cfgTuiVimModeDisplay,
@@ -442,7 +462,7 @@ import {
 import { cfgTasksTodoClearDelay } from "../tools/settings";
 import { cfgWorktreeOnExit, cfgWorktreeOnStart } from "../task/settings";
 import { cfgExpandThinkingBlocks, cfgProseOnlyThinking } from "../session/settings";
-import { cfgHideThinkingBlock } from "../session/settings";
+import { cfgDefaultThinkingLevel, cfgHideThinkingBlock } from "../session/settings";
 import { cfgCycleOrder, cfgModelRoles } from "../config/model-settings";
 import { cfgExtensionHandlersModeControl } from "../extensibility/settings";
 import { cfgGoalContinuationModes, cfgGoalEnabled } from "../goals/settings";
@@ -489,6 +509,7 @@ const cfgLiveUiSettings = combine({
 	"composer.predictions": cfgComposerPredictions,
 	"composer.inlineCompletions": cfgComposerInlineCompletions,
 	"composer.marginHud": cfgComposerMarginHud,
+	"composer.predictionAlternatives": cfgComposerPredictionAlternatives,
 	"compaction.enabled": cfgCompactionEnabled,
 	"compaction.methodOrder": cfgCompactionMethodOrder,
 	"display.hideToolActivity": cfgDisplayHideToolActivity,
@@ -511,6 +532,7 @@ const cfgLiveUiSettings = combine({
 	"tui.hyperlinks": cfgTuiHyperlinks,
 	"tui.titleState": cfgTuiTitleState,
 	"tui.titleSpinner": cfgTuiTitleSpinner,
+	motion: cfgMotionResolved,
 	"statusLine.preset": cfgStatusLinePreset,
 	"statusLine.leftSegments": cfgStatusLineLeftSegments,
 	"statusLine.rightSegments": cfgStatusLineRightSegments,
@@ -1204,10 +1226,7 @@ function renderSubagentToolPreview(session: ObservableSession, width: number): s
 	const elapsedWidth = visibleWidth(elapsedLabel);
 	const hook = `${theme.fg("dim", theme.tree.hook)} `;
 	// Between calls the row keeps the last call, marked with how it ended.
-	const status =
-		!currentTool && recent
-			? `${theme.styledSymbol(recent.isError ? "status.error" : "status.success", recent.isError ? "error" : "success")} `
-			: "";
+	const status = !currentTool && recent ? `${formatStatusIcon(recent.isError ? "error" : "success", theme)} ` : "";
 	const prefixWidth = visibleWidth(hook) + visibleWidth(status);
 	// Reserve the elapsed marker first, then cap the tool name; the detail gets whatever is left.
 	const shortTool = truncateToWidth(replaceTabs(tool), Math.max(0, width - prefixWidth - elapsedWidth), "");
@@ -1246,7 +1265,7 @@ export function renderSubagentHudLines(
 	// rows budgeted to the full terminal width would wrap.
 	const contentColumns = Math.max(0, columns - getPaddingX(1) * 2);
 	const layout = layoutPinnedHud(running.length, expanded);
-	const dot = theme.styledSymbol("status.done", "accent");
+	const dot = formatStatusIcon("running", theme);
 	const items = running.slice(0, layout.itemRows);
 	const showModelBadge = isFeedModelBadgeEnabled();
 	const outerIndent = " ";
@@ -1365,6 +1384,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly composer: Composer;
 	ui: TUI;
 	chatContainer: TranscriptContainer;
+	/** `!`/`$` runs started while the agent streams; {@link flushPendingBashComponents} moves them into the transcript. */
+	pendingShellContainer: Container;
 	pendingMessagesContainer: Container;
 	/** Judge-batch and automatic-download progress rows above the working line. */
 	progressHudContainer: Container;
@@ -1442,7 +1463,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		| ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => CustomEditor)
 		| undefined;
 	#composerStatusPersistTimer: NodeJS.Timeout | undefined;
-	readonly #initialComposerModel: Model | undefined;
 	readonly #judgmentBatchProgressHud = new JudgmentBatchProgressHud();
 	readonly #downloadActivityHud = new DownloadActivityHud(() => this.ui.requestRender());
 	readonly #judgmentBatchProgressClearTimers = new Map<string, NodeJS.Timeout>();
@@ -1455,10 +1475,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * which flips to the destination before `reloadTodos` refreshes during
 	 * focus attach.
 	 */
-	#todoPhasesOwner?: AgentSession;
+	#todoPhasesOwner?: AgentViewSession;
 	#todoHudHidden = false;
 	hideThinkingBlock = false;
-	#sessionsWithDisplayableThinkingContent = new WeakSet<AgentSession>();
+	#sessionsWithDisplayableThinkingContent = new WeakSet<AgentViewSession>();
 	/** Whether the visible session has produced thinking content the user can reveal. */
 	get hasDisplayableThinkingContent(): boolean {
 		return this.#sessionsWithDisplayableThinkingContent.has(this.viewSession);
@@ -1512,7 +1532,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (cfgComposerShape.get(settings) !== "band") return undefined;
 		const name = this.sessionManager.getSessionName();
 		if (!name) return undefined;
-		return `\x1b[2;3m${sanitizeStatusText(name)}\x1b[23;22m`;
+		const pin = this.statusLine.isSessionPinned(this.sessionManager.getSessionId()) && theme.icon.pin;
+		const title = sanitizeStatusText(name);
+		return `\x1b[2;3m${pin ? `${pin} ${title}` : title}\x1b[23;22m`;
 	}
 	/** Live gen tok/s for the working row: the viewed session's own meter, so a
 	 * focused subagent shows its own reading and the main session's survives
@@ -1534,6 +1556,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		const title = this.#workingTitleTrailer();
 		if (rate && title) return `${rate}  ${title}`;
 		return rate ?? title;
+	}
+	#resolveModelMentionChip(selector: string): { label: string; selector: string } | undefined {
+		const resolved = this.session.resolveModelMention(selector);
+		return resolved && { label: modelMentionChipLabel(resolved.name), selector: resolved.selector };
 	}
 	/** Idle stand-in for the working row: the last tok/s reading and the
 	 * band-mode title stay readable between turns, docked where the loader's
@@ -1563,7 +1589,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** The job widget registry this mode repaints on, and how to stop listening to it. */
 	#jobWidgetsListener: { registry: JobWidgetRegistry; unsubscribe: () => void } | undefined;
 	/** The job manager whose settled jobs repaint the running counts, and how to stop listening to it. */
-	#jobSettleListener: { manager: AsyncJobManager; unsubscribe: () => void } | undefined;
+	#jobSettleListener: { manager: AsyncJobManagerApi; unsubscribe: () => void } | undefined;
 	/**
 	 * Repaint whenever a shown job widget changes (the HUD jobs segment, the
 	 * status line's glance), following the root job manager's current registry.
@@ -1752,8 +1778,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#cleanupUnsubscribe?: () => void;
 	#signalTeardown?: SessionTeardown;
 	readonly #version: string;
-	readonly #startupChangelog: StartupChangelogSelection | undefined;
-	/** Header components below the config warnings + welcome, retained so a live config-warning change can rebuild the header (#10048). */
+	/** Header components below the config warnings + welcome (the startup changelog), retained so a live config-warning change can rebuild the header (#10048). */
 	#headerAfter: readonly Component[] = [];
 	#planModePreviousToolPresentation: { enabled: string[]; mounted: string[]; registered: string[] } | undefined;
 	#goalModePreviousTools: string[] | undefined;
@@ -1794,6 +1819,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#sessionInfoOverlayHandle: OverlayHandle | undefined;
 	#jobsSheetHandle: OverlayHandle | undefined;
 	#wheelScrollbackHandle: OverlayHandle | undefined;
+	#spotlightSheetHandle: OverlayHandle | undefined;
 	/** Re-renders the open jobs sheet so output tails and pids stay live. */
 	#jobsSheetTimer: NodeJS.Timeout | undefined;
 	#planReviewOwner: object | undefined;
@@ -1851,14 +1877,14 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #focusController: SessionFocusController;
 	/** Sessions retain this small activity record, not the terminal and its transcript, after the view leaves. */
 	readonly #idleMaintenanceActivity: {
-		target: AgentSession | undefined;
+		target: AgentViewSession | undefined;
 		ready: boolean;
 		isComposing: boolean;
-		scheduledTurn: ((target: AgentSession) => boolean) | undefined;
+		scheduledTurn: ((target: AgentViewSession) => boolean) | undefined;
 		presentRecap: ((recap: string) => void) | undefined;
 	} = { target: undefined, ready: false, isComposing: false, scheduledTurn: undefined, presentRecap: undefined };
 
-	syncIdleMaintenanceView(target: AgentSession | null = this.viewSession): void {
+	syncIdleMaintenanceView(target: AgentViewSession | null = this.viewSession): void {
 		const activity = this.#idleMaintenanceActivity;
 		const previous = activity.target;
 		if (target === null) {
@@ -1882,8 +1908,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (previous !== target) previous?.refreshIdleMaintenance();
 		target.refreshIdleMaintenance();
 	}
-	get viewSession(): AgentSession {
-		return this.#focusController?.target ?? this.session;
+	get viewSession(): AgentViewSession {
+		return this.#focusController.target ?? this.session;
 	}
 	get assistantImagesVisible(): boolean {
 		return cfgTerminalShowImages.get(this.settings);
@@ -1969,6 +1995,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.retryLoader = undefined;
 		}
 		this.statusContainer.disposeChildren();
+		this.pendingShellContainer.disposeChildren();
 		this.pendingMessagesContainer.disposeChildren();
 		this.#clearJudgmentBatchProgress();
 		this.#cancelModelCycleClearTimer();
@@ -2001,6 +2028,27 @@ export class InteractiveMode implements InteractiveModeContext {
 	#mouseCapture = false;
 	/** A link-scheme change awaits its transcript rebuild; any rebuild before it covers it. */
 	#extensionLinkRebuildPending = false;
+	/** The fullscreen extension link browser while it is shown. */
+	#linkBrowser: { component: LinkBrowserComponent; handle: OverlayHandle } | undefined;
+	/**
+	 * The start of the viewed branch the link browser last found no extension link in: its first
+	 * `checked` entries, the last of them `lastId`. They end where a user turn starts, so no later
+	 * entry changes how they draw (as a tool result does its call's card). The next check replays
+	 * only the entries after them, until the session, the link schemes, the width or the renderers
+	 * change. It holds the session by id and the renderers weakly, so a finished subagent's
+	 * session and extensions stay collectable.
+	 */
+	#linkBrowserMiss:
+		| {
+				sessionId: string;
+				key: string;
+				renderers: readonly WeakRef<AssistantTextRenderer>[];
+				checked: number;
+				lastId: string | undefined;
+		  }
+		| undefined;
+	/** A rebuild of the transcript's terminal scrollback held back until the link browser closes. */
+	#scrollbackRebuildPending = false;
 	#observerUiSyncTimer?: NodeJS.Timeout;
 	/** Repaints the subagent HUD so live-preview elapsed markers advance between progress events. */
 	#subagentPreviewTickTimer?: NodeJS.Timeout;
@@ -2031,7 +2079,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	constructor(
 		session: AgentSession,
 		version: string,
-		startupChangelog: StartupChangelogSelection | undefined = undefined,
 		setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void = () => {},
 		lspServers: LspStartupServerInfo[] | undefined = undefined,
 		mcpManager?: MCPManager,
@@ -2044,7 +2091,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.session = session;
 		this.sessionManager = session.sessionManager;
 		this.settings = session.settings;
-		this.#initialComposerModel = session.model;
 		const preferences = {
 			quiet: cfgStartupQuiet.get(settings),
 			composerShape: cfgComposerShape.get(settings),
@@ -2063,7 +2109,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor = this.composer.editor;
 		this.editor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
 		this.editor.placeholder = () => this.#composerHint();
-		this.editor.prediction = () => undefined;
+		this.editor.predictions = () => this.#eventController.composerPrediction.choices;
+		this.editor.onPredictionAccepted = index => this.#eventController.composerPrediction.accepted(index);
+		this.editor.onPredictionShown = () => this.#eventController.composerPrediction.shown();
 		this.editor.onFallbackTab = () => !this.focusedAgentId && this.#predictionMultiSelect.toggleAll();
 		this.editor.inlineCompletion = (lines, line, col) =>
 			this.#eventController?.composerInlineCompletion.getInlineCompletion(lines, line, col);
@@ -2073,17 +2121,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.onToggleDictation = () => void this.#toggleComposerDictation();
 		this.editor.imageReferenceHyperlink = imageReferenceHyperlink;
 		this.editor.skillFilePath = name => this.skillCommands.get(`skill:${name}`)?.filePath;
-		this.editor.modelMentionLabel = selector => {
-			const model = this.session.findMentionableModel(selector);
-			return model ? modelMentionChipLabel(modelMentionDisplayName(model)) : undefined;
-		};
+		this.editor.resolveModelMention = selector => this.#resolveModelMentionChip(selector);
 		this.editor.modelMentionSelector = agent => this.session.modelMentions.find(m => m.agent === agent)?.selector;
 		this.editor.fileHyperlink = (filePath, text) => fileHyperlink(filePath, text, { line: 1 });
 		this.#ownsStartedUi = wasStarted;
 		this.keybindings = KeybindingsManager.inMemory();
 		this.agent = session.agent;
 		this.#version = version;
-		this.#startupChangelog = startupChangelog;
 		this.#toolUiContextSetter = setToolUIContext;
 		this.lspServers = lspServers;
 		this.mcpManager = mcpManager;
@@ -2154,6 +2198,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			}),
 		);
 		this.chatContainer = new TranscriptContainer();
+		this.pendingShellContainer = new AnchoredLiveContainer();
 		this.pendingMessagesContainer = new AnchoredLiveContainer();
 		this.progressHudContainer = new AnchoredLiveContainer();
 		this.progressHudContainer.addChild(this.#judgmentBatchProgressHud);
@@ -2245,6 +2290,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				case "status.quota":
 					void this.handleQuotaCommand();
 					return;
+				// Only the main session has a cache warmer, so a focused subagent's bar shows no
+				// cache marker: this click always comes from the main session's marker.
+				case "status.cache":
+					void this.handleSessionCommand();
+					return;
 				case "status.path":
 					openPath(this.sessionManager.getCwd());
 					return;
@@ -2273,11 +2323,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 		}
 		this.#predictionMultiSelect = new ComposerPredictionMultiSelect({
-			getRawPrediction: () =>
-				this.focusedAgentId
-					? undefined
-					: (this.#eventController?.composerPrediction.text ??
-						this.#eventController?.composerInlineCompletion.emptyPrediction),
+			getRawPrediction: () => {
+				if (this.focusedAgentId) return undefined;
+				const choices = this.#eventController?.composerPrediction.choices;
+				if (choices && choices.length > 0) {
+					if (choices.length === 1) return choices[0];
+					return choices.map((choice, index) => `${index + 1}. ${choice}`).join("  ");
+				}
+				return this.#eventController?.composerInlineCompletion.emptyPrediction;
+			},
 			requestRender: () => this.ui.requestRender(),
 		});
 		this.#marginHudCollector = new MarginHudTelemetryCollector({
@@ -2572,27 +2626,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const startupQuiet = cfgStartupQuiet.get(settings);
 		this.composer.setPreferences({ quiet: startupQuiet });
 		this.composer.updateWelcome({ version: this.#version });
-		const headerBefore = this.#buildConfigWarningComponents();
-		const headerAfter: Component[] = [];
-		if (!startupQuiet && this.#startupChangelog && cfgStartupChangelogMode.get(settings) !== "hidden") {
-			headerAfter.push(
-				new DynamicBorder(),
-				new Text("What's New", 1, 0).setStyleFn(t => theme.bold(theme.fg("accent", t))),
-				new Spacer(1),
-			);
-			if (cfgStartupChangelogMode.get(settings) === "summary") {
-				const summary = formatStartupChangelogSummary(this.#startupChangelog).replace(
-					/\/changelog(?: full)?/g,
-					command => theme.bold(command),
-				);
-				headerAfter.push(new Text(summary, 1, 0));
-			} else {
-				headerAfter.push(new Markdown(this.#startupChangelog.markdown?.trim() ?? "", 1, 0, getMarkdownTheme()));
-			}
-			headerAfter.push(new Spacer(1), new DynamicBorder());
-		}
-		this.#headerAfter = headerAfter;
-		this.composer.setHeaderExtras(headerBefore, headerAfter);
+		this.#syncHeaderExtras();
 		this.statusLine.watchBranch(() => this.ui.requestRender());
 		this.composer.setStatusComponent(this.statusLine);
 		if (cfgComposerMarginHud.get(this.settings)) {
@@ -2602,6 +2636,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.composer.setRuntimeChildren(
 			[
 				this.chatContainer,
+				this.pendingShellContainer,
 				this.pendingMessagesContainer,
 				this.todoContainer,
 				this.subagentContainer,
@@ -2638,6 +2673,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.#marginHudFrame,
 					this.attachmentChipsContainer,
 					this.reportContainer,
+					this.pendingShellContainer,
 					this.pendingMessagesContainer,
 					this.btwContainer,
 					this.omfgContainer,
@@ -2671,6 +2707,9 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.editorContainer,
 					this.hookWidgetContainerBelow,
 				],
+				// Deferred shell runs are transcript output: natively they flow at its
+				// end, where they stay when they move in, not pinned over the composer.
+				nativeTail: [this.pendingShellContainer],
 			},
 		);
 		this.ui.setFocus(this.editor);
@@ -2702,6 +2741,9 @@ export class InteractiveMode implements InteractiveModeContext {
 						(error: unknown) =>
 							this.showWarning(`Copy failed: ${error instanceof Error ? error.message : String(error)}`),
 					);
+					return;
+				case "spotlight":
+					void this.#showSpotlightSheet(action.spotlight, action.reduced);
 			}
 		});
 
@@ -2749,6 +2791,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		initTerminalTitleState();
 		setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
+		setTerminalTitleSpinnerInterval(cfgMotionResolved.get(this.settings).spinnerInterval);
 		initProgramStatus();
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
 		// OSC 133;A starts a shell prompt and invalidates working/blocked records.
@@ -2768,6 +2811,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Deliberately here rather than beside #applyVimMode in the constructor: that runs before
 		// #focusController exists, which updateEditorBorderColor dereferences.
 		this.#syncVimStatus(this.editor);
+		void this.#syncSessionPinned();
 		// Single side-effect point for title changes: every setSessionName caller
 		// (first-input titling, /rename, extension renames, plan seeding, replan
 		// refresh) gets the terminal title + accent updates from here. Registered
@@ -2789,7 +2833,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#handleSessionAccentInputsChanged();
 			}),
 			// Fork and branch adopt a new session file without retitling.
-			this.session.registerSessionChangeCallback(reportTernSession),
+			this.session.registerSessionChangeCallback(() => {
+				reportTernSession();
+				void this.#syncSessionPinned();
+			}),
 		);
 		this.#syncEditorMaxHeight();
 		this.isInitialized = true;
@@ -2931,7 +2978,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.session.prewarmModelConnection();
 				}
 				if (event.type === "config_warnings_changed") {
-					this.#syncConfigWarningHeader();
+					this.#syncHeaderExtras();
 				}
 				// A turn the TUI did not submit (an extension message, a background job) leaves
 				// getUserInput pending, so arm the loop's next iteration here instead.
@@ -2940,14 +2987,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			}),
 			cfgLiveUiSettings.listen(this.settings, (next, previous) => this.#applyUiSettingChanges(next, previous)),
 		);
-		// Cache the live model for the next status-bar prepaint: init-time
-		// reconciliations (#reconcileModeFromSession, #enterPlanMode for
-		// plan.defaultOnStartup) can change the model before this subscription
-		// exists, so the model_changed events they emit are never observed above.
+		// Refresh the next launch's status prepaint once startup settles: settings
+		// and the model catalog may have changed since the last session wrote it.
 		this.#scheduleComposerStatusPersist();
 		// Config warnings can change during the same pre-subscription window; the
 		// event is not replayed, so rebuild from the live array once here too.
-		this.#syncConfigWarningHeader();
+		this.#syncHeaderExtras();
 		this.#eventBusUnsubscribers.push(
 			cfgModelRoles.listen(this.settings, () => this.#reapplyPlanModeModelOnRoleChange()),
 		);
@@ -4143,6 +4188,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#stopLoadingAnimation(true);
 		}
 		this.rebuildChatFromMessages();
+		// A /btw inject keeps its own retry (its key re-arms and it reports the reason); handing it
+		// to the editor as well would offer a second way to send it.
+		if (this.#btwController.reclaimDroppedPrompt(prompt)) {
+			this.ui.requestRender();
+			return;
+		}
 		// The rebuild drops transient notices, including the one that refused this prompt.
 		if (prompt.reason) this.showError(prompt.reason);
 		// The drop arrives asynchronously (after the abort settles); never clobber
@@ -4286,8 +4337,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#renderSubagentList();
 			this.ui.requestRender();
 		}
-		if (any("composer.predictions") && !next["composer.predictions"]) {
-			this.#eventController.composerPrediction.cancel();
+		const composerPrediction = this.#eventController.composerPrediction;
+		if (
+			(any("composer.predictions") && !next["composer.predictions"]) ||
+			// Alternatives already offered would keep their list until the next turn.
+			(any("composer.predictionAlternatives") &&
+				!next["composer.predictionAlternatives"] &&
+				(composerPrediction.choices?.length ?? 0) > 1)
+		) {
+			composerPrediction.cancel();
 		}
 		if (any("composer.inlineCompletions") && !next["composer.inlineCompletions"]) {
 			this.#eventController.composerInlineCompletion.cancel();
@@ -4389,6 +4447,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Components take the extension text renderers when built; the rebuild keeps the streaming
 		// reply's components, so hand them the new set directly.
 		if (any("extensionRenderers.assistantText")) {
+			// The browser replays with the renderers it opened with: close it rather than show them stale.
+			this.closeLinkBrowser();
 			this.#applyExtensionLinks();
 			this.#eventController.applyAssistantTextRenderers();
 			rebuildChat = true;
@@ -4416,6 +4476,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (any("tui.titleState")) setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		if (any("tui.titleSpinner")) setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		if (any("terminal.programStatus")) setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
+		if (any("motion")) setTerminalTitleSpinnerInterval(next.motion.spinnerInterval);
 
 		if (
 			any(
@@ -4490,8 +4551,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#redrawExtensionLinks();
 	}
 
-	/** Redraw the transcript so renderers reading `getLinkClicksAvailable()` switch form now. */
+	/**
+	 * Redraw the transcript so renderers reading `getLinkClicksAvailable()` switch form now, and close
+	 * the link browser, whose copy was drawn with the renderers and links of before.
+	 */
 	#redrawExtensionLinks(): void {
+		this.closeLinkBrowser();
 		// The rebuild keeps the live reply's components; re-run their renderers rather than waiting
 		// for the next streaming update.
 		this.#eventController.applyAssistantTextRenderers();
@@ -4695,12 +4760,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		return true;
 	}
 
-	/** Raise `link_activate` for `url` on the viewed session's extension runner, or run built-in `omp-ui:` actions. */
-	#activateLink(url: string): boolean {
+	/** Raise `link_activate` for `url` on `runner`, the extension runner of the transcript it was drawn in. */
+	#activateLink(url: string, runner: ExtensionRunner | undefined): boolean {
 		if (url.startsWith("omp-ui:")) {
 			return this.#activateOmpUiLink(url);
 		}
-		const runner = this.viewSession.extensionRunner;
 		if (!runner) return false;
 		// A focused subagent's runner is headless: hand its handler the UI drawing that transcript.
 		runner.emitLinkActivate(url, this.session.extensionRunner?.getUIContext()).catch((error: unknown) => {
@@ -4711,13 +4775,14 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	activateViewportLink(index: number, col: number): boolean {
 		const url = this.composer.viewportLinkAt(index, col)?.url;
-		return url !== undefined && this.#activateLink(url);
+		return url !== undefined && this.#activateLink(url, this.viewSession.extensionRunner);
 	}
 
 	startLinkHints(): boolean {
 		if (!extensionLinksRouted()) return false;
 		if (this.composer.viewportLinkCount() === 0) {
-			this.showStatus("No extension links on screen");
+			// Links may still be drawn in terminal scrollback, out of the tags' reach: browse for them.
+			if (!this.openLinkBrowser()) this.showStatus("No extension links in the transcript");
 			return true;
 		}
 		this.composer.startLinkHints(reason => {
@@ -4739,7 +4804,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	typeLinkHint(letter: string): void {
 		const picked = this.composer.typeLinkHint(letter);
-		if (typeof picked === "object") this.#activateLink(picked.url);
+		if (typeof picked === "object") this.#activateLink(picked.url, this.viewSession.extensionRunner);
 		this.ui.requestRender();
 	}
 
@@ -4747,6 +4812,110 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.composer.cancelLinkHints();
 	}
 
+	openLinkBrowser(): boolean {
+		this.composer.cancelLinkHints();
+		if (this.#linkBrowser || !extensionLinksRouted()) return false;
+		const view = this.viewSession;
+		const renderers = view.extensionRunner?.getAssistantTextRenderers() ?? [];
+		const columns = this.ui.terminal.columns;
+		const key = `${extensionLinksVersion()}\0${columns}`;
+		const entries: TranscriptEntryLike[] = view.sessionManager.getBranch().filter(isTranscriptEntry);
+		const committed = entries.length;
+		const sessionId = view.sessionManager.getSessionId();
+		const miss = this.#linkBrowserMiss;
+		const checked =
+			miss?.sessionId === sessionId &&
+			miss.key === key &&
+			miss.renderers.length === renderers.length &&
+			miss.renderers.every((renderer, index) => renderer.deref() === renderers[index]) &&
+			entries[miss.checked - 1]?.id === miss.lastId
+				? miss.checked
+				: 0;
+		// A reply still streaming is drawn as far as it has come; the browser keeps that snapshot.
+		const streaming = view.isStreaming ? this.streamingMessage : undefined;
+		if (streaming) {
+			entries.push({
+				type: "message",
+				id: "omp:link-browser-streaming-reply",
+				parentId: null,
+				timestamp: new Date(streaming.timestamp).toISOString(),
+				message: streaming,
+			});
+		}
+		const deps: LinkBrowserDeps = {
+			ui: this.ui,
+			getTool: name => view.getToolByName(name),
+			isBuiltInTool: name => view.hasBuiltInTool(name),
+			getMessageRenderer: type => view.extensionRunner?.getMessageRenderer(type),
+			cwd: view.sessionManager.getCwd(),
+			hideThinkingBlock: () => this.effectiveHideThinkingBlock,
+			proseOnlyThinking: () => this.proseOnlyThinking,
+			expandThinkingBlocks: () => this.expandThinkingBlocks,
+			linkTargets: getAssistantMessageLinkTargets(this),
+			textRenderers: renderers,
+			requestRender: () => this.ui.requestRender(),
+			// The runner whose transcript the browser draws, even if the view changes while it is open.
+			onActivate: url => this.#activateLink(url, view.extensionRunner),
+			onClose: () => this.closeLinkBrowser(),
+		};
+		let component = new LinkBrowserComponent(entries.slice(checked), deps);
+		if (!component.hasLinks(columns)) {
+			component.dispose();
+			// Cache up to the last user turn start; the turn from there may still change.
+			let settled = committed - 1;
+			while (settled > checked && !isUserRequestEntry(entries[settled]!)) settled--;
+			if (settled > checked) {
+				this.#linkBrowserMiss = {
+					sessionId,
+					key,
+					renderers: renderers.map(renderer => new WeakRef(renderer)),
+					checked: settled,
+					lastId: entries[settled - 1]!.id,
+				};
+			}
+			return false;
+		}
+		if (checked > 0) {
+			// The link is in the entries after the cached part: open on the whole branch.
+			component.dispose();
+			component = new LinkBrowserComponent(entries, deps);
+		}
+		const handle = this.ui.showOverlay(component, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+			fullscreen: true,
+		});
+		this.#linkBrowser = { component, handle };
+		return true;
+	}
+
+	closeLinkBrowser(): void {
+		const open = this.#linkBrowser;
+		if (!open) return;
+		this.#linkBrowser = undefined;
+		// Hiding hands focus back to the editor area it was opened from, or leaves it with an
+		// overlay a link handler opened on top.
+		open.handle.hide();
+		open.component.dispose();
+		if (this.#scrollbackRebuildPending) this.rebuildTranscriptScrollback();
+		this.ui.requestRender();
+	}
+
+	rerenderInLinkBrowser(timestamp: number): void {
+		// The redrawn reply may now draw a link.
+		this.#linkBrowserMiss = undefined;
+		this.#linkBrowser?.component.rerenderMessage(timestamp);
+	}
+
+	rebuildTranscriptScrollback(): void {
+		// The browser covers the screen: rebuild once, when it closes, rather than under it.
+		this.#scrollbackRebuildPending = this.#linkBrowser !== undefined;
+		if (this.#scrollbackRebuildPending) return;
+		this.chatContainer.resetStableEmission();
+		this.ui.resetDisplay();
+	}
 	/** Coalesce status-cache writes; `stop()` flushes a pending one synchronously. */
 	#scheduleComposerStatusPersist(): void {
 		if (this.#composerStatusPersistTimer) return;
@@ -4758,16 +4927,30 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/**
-	 * Cache the inputs of a fresh session's status bar (settings, model, thinking
-	 * state) so the next launch renders it at first paint; see `createStartupStatusLine`.
+	 * Cache the inputs of a fresh session's status bar (settings, the configured
+	 * default model and the thinking level a new session starts it at) so the
+	 * next launch renders it at first paint; see `createStartupStatusLine`.
 	 */
 	#persistComposerStatus(): void {
 		if (!this.sessionManager.getSessionFile()) return;
-		// Role changes affect the next fresh launch; session-only switches do not.
-		const initialModel = this.#initialComposerModel ?? this.session.model;
-		const model = this.settings.getModelRole("default")
-			? (this.session.resolveRoleModelWithThinking("default").model ?? initialModel)
-			: initialModel;
+		// Prepaint runs only for launches without model flags, which read the persisted
+		// roles alone: `--model`/`--smol` overrides and session-only switches stay out.
+		const roles: ModelRoleLookup = {
+			getModelRole: role => this.settings.getProjectModelRole(role) ?? this.settings.getGlobalModelRole(role),
+		};
+		const defaultRole = resolveModelRoleValue(
+			roles.getModelRole("default"),
+			this.session.modelRegistry.getAvailable(),
+			{ settings: this.settings, roleLookup: roles },
+		);
+		const model = defaultRole.model;
+		// Without a resolvable default the next launch picks a fallback; keep the previous speculation.
+		if (!model) return;
+		const thinking = newSessionThinkingLevel(
+			model,
+			defaultRole.explicitThinkingLevel ? defaultRole.thinkingLevel : undefined,
+			parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(this.settings)),
+		);
 		// Recover the border's ANSI wrapper by coloring a sentinel and splitting around it.
 		const marker = "\0";
 		const colored = this.editor.borderColor(marker);
@@ -4784,18 +4967,21 @@ export class InteractiveMode implements InteractiveModeContext {
 				settings: statusLineHost.getSettings(),
 				gitEnabled: statusLineHost.gitEnabled(),
 				model,
-				thinkingLevel: this.session.thinkingLevel,
-				autoThinking: this.session.isAutoThinking,
+				thinkingLevel: resolveConfiguredThinkingLevel(model, thinking),
+				autoThinking: thinking === AUTO_THINKING,
 				// A fresh session derives tiers from settings, not this session's `/fast` toggles.
-				fastMode: model ? this.session.isFastModeConfiguredFor(model) : false,
-				usingSubscription: model ? this.session.modelRegistry.isUsingOAuth(model) : false,
+				fastMode: this.session.isFastModeConfiguredFor(model),
+				usingSubscription: this.session.modelRegistry.isUsingOAuth(model),
 				autoCompactEnabled: this.session.autoCompactionEnabled,
-				compactionBoundaries: model?.contextWindow
+				compactionBoundaries: model.contextWindow
 					? statusLineHost.computeCompactionBoundaries(this.session, model.contextWindow, model)
 					: null,
 			},
 		};
-		sharedComposerCache()?.writeStatus(this.sessionManager.getCwd(), status);
+		// A project-scoped default must not become every other folder's first frame.
+		sharedComposerCache()?.writeStatus(this.sessionManager.getCwd(), status, {
+			shared: this.settings.getProjectModelRole("default") === undefined,
+		});
 	}
 
 	#handleSessionAccentInputsChanged(): void {
@@ -4960,6 +5146,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	rebuildChatFromMessages(options: { reuseSettledComponents?: boolean } = {}): void {
 		this.#extensionLinkRebuildPending = false;
+		// A transcript setting may draw links it did not before.
+		this.#linkBrowserMiss = undefined;
 		// Mid-stream rebuilds (e.g. `/shake`, theme/setting changes that touch the
 		// transcript) replay only committed `state.messages`. The agent's in-flight
 		// `streamMessage` and its still-pending tool calls live OUTSIDE
@@ -5182,10 +5370,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// bound (rather than routing through `setTodos`, which rebinds it to
 		// `viewSession`) keeps a follow-up reconcile in the same window correct.
 		const owner = this.#todoPhasesOwner ?? this.session;
-		owner.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, {
-			phases: next,
-		});
-		owner.setTodoPhases(next);
+		owner.commitTodoPhases(next);
 		this.todoPhases = next;
 		this.#syncTodoHudState(owner);
 		this.#renderTodoList();
@@ -5200,7 +5385,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	#syncTodoHudState(owner: AgentSession): void {
+	#syncTodoHudState(owner: AgentViewSession): void {
 		this.#cancelTodoAutoClearTimer();
 		const phases = this.todoPhases;
 		const persisted = getTodoHudVisibility(owner.sessionManager.getBranch(), phases);
@@ -5648,7 +5833,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return [...leadingLines, combinedLine];
 	}
 
-	async #loadTodoList(source: AgentSession = this.session): Promise<void> {
+	async #loadTodoList(source: AgentViewSession = this.session): Promise<void> {
 		this.todoPhases = source.getTodoPhases();
 		this.#todoPhasesOwner = source;
 		this.#syncTodoHudState(source);
@@ -6708,6 +6893,24 @@ export class InteractiveMode implements InteractiveModeContext {
 			editor.vimEnabled && editor.vimMode !== "insert" ? "block" : editor.vimEnabled ? "bar" : "default",
 		);
 		this.updateEditorBorderColor();
+	}
+
+	/** Bumped by every pin-state write so a slower pins-file read can't overwrite a newer update. */
+	#pinStateGeneration = 0;
+
+	/** Reload the pinned set from disk: at startup and on session switch, picking up other instances' pins. */
+	async #syncSessionPinned(): Promise<void> {
+		const generation = ++this.#pinStateGeneration;
+		const pinnedIds = await loadPinnedSessionIds();
+		if (generation !== this.#pinStateGeneration) return;
+		this.statusLine.setPinnedSessionIds(pinnedIds);
+		this.ui.requestRender();
+	}
+
+	applySessionPin(sessionId: string, pinned: boolean): void {
+		this.#pinStateGeneration++;
+		this.statusLine.setSessionPinned(sessionId, pinned);
+		this.ui.requestRender();
 	}
 
 	async #copyYankToClipboard(content: string): Promise<void> {
@@ -8583,7 +8786,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.viewportRowsProvider = () => this.ui.terminal.rows;
 		nextEditor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
 		nextEditor.placeholder = () => this.#composerHint();
-		nextEditor.prediction = () => undefined;
+		nextEditor.predictions = () => this.#eventController.composerPrediction.choices;
+		nextEditor.onPredictionAccepted = index => this.#eventController.composerPrediction.accepted(index);
+		nextEditor.onPredictionShown = () => this.#eventController.composerPrediction.shown();
 		nextEditor.onFallbackTab = () => !this.focusedAgentId && this.#predictionMultiSelect.toggleAll();
 		nextEditor.inlineCompletion = (lines, line, col) =>
 			this.#eventController?.composerInlineCompletion.getInlineCompletion(lines, line, col);
@@ -8594,10 +8799,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.attachmentChips = previousEditor.attachmentChips;
 		nextEditor.imageReferenceHyperlink = imageReferenceHyperlink;
 		nextEditor.skillFilePath = name => this.skillCommands.get(`skill:${name}`)?.filePath;
-		nextEditor.modelMentionLabel = selector => {
-			const model = this.session.findMentionableModel(selector);
-			return model ? modelMentionChipLabel(modelMentionDisplayName(model)) : undefined;
-		};
+		nextEditor.resolveModelMention = selector => this.#resolveModelMentionChip(selector);
 		nextEditor.modelMentionSelector = agent => this.session.modelMentions.find(m => m.agent === agent)?.selector;
 		nextEditor.fileHyperlink = (filePath, text) => fileHyperlink(filePath, text, { line: 1 });
 		nextEditor.onAutocompleteCancel = () => {
@@ -8730,6 +8932,44 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestRender();
 	}
 
+	/**
+	 * The Spotlight sheet of a shaped tool result (its notice's click): the original, loaded from the session
+	 * artifact its trace names, beside the text the model saw; for a held-out or gated result, beside the would-be text
+	 * its `shapedUrl` names. One at a time; Esc closes it.
+	 */
+	async #showSpotlightSheet(spotlight: SpotlightDetails, reduced: string): Promise<void> {
+		if (this.#spotlightSheetHandle || !hasSpotlightOriginal(spotlight)) return;
+		const sessionManager = this.viewSession.sessionManager;
+		const original = await readArtifactText(sessionManager, spotlight.original.url);
+		if (original === null) {
+			this.showWarning(`The original of this result is gone (${spotlight.original.url}).`);
+			return;
+		}
+		if (spotlight.holdout || spotlight.gated) {
+			const shapedUrl = spotlight.original.shapedUrl;
+			const shaped = shapedUrl ? await readArtifactText(sessionManager, shapedUrl) : null;
+			if (shaped === null) {
+				this.showWarning(`The would-be text of this held-out result is gone (${shapedUrl ?? "never saved"}).`);
+				return;
+			}
+			reduced = shaped;
+		}
+		if (this.#spotlightSheetHandle) return;
+		const sheet = new SpotlightSheet({ spotlight, original, reduced, close: () => this.#hideSpotlightSheet() });
+		this.#spotlightSheetHandle = this.ui.showOverlay(sheet, { anchor: "center", width: "100%", maxHeight: "100%" });
+		this.ui.setFocus(sheet);
+		this.ui.requestRender();
+	}
+
+	#hideSpotlightSheet(): void {
+		const handle = this.#spotlightSheetHandle;
+		this.#spotlightSheetHandle = undefined;
+		if (!handle) return;
+		handle.hide();
+		this.#selectorController.focusActiveEditorArea();
+		this.ui.requestRender();
+	}
+
 	#hideJobsSheet(): void {
 		const handle = this.#jobsSheetHandle;
 		this.#jobsSheetHandle = undefined;
@@ -8852,7 +9092,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	#syncConfigWarningHeader(): void {
+	#syncHeaderExtras(): void {
 		this.composer.setHeaderExtras(this.#buildConfigWarningComponents(), this.#headerAfter);
 	}
 
@@ -9020,6 +9260,39 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showNewVersionNotification(newVersion: string): void {
 		this.#uiHelpers.showNewVersionNotification(newVersion);
+	}
+
+	/** Show (or with `null`, clear) background auto-update progress after the welcome banner's version. */
+	showVersionUpdate(update: VersionUpdate | null): void {
+		this.composer.updateWelcome({ versionUpdate: update });
+	}
+
+	/**
+	 * Add this launch's release notes below the welcome header. Startup calls it
+	 * after the first session-bound frame; quiet startup and hidden mode show nothing.
+	 */
+	showStartupChangelog(selection: StartupChangelogSelection): void {
+		const mode = cfgStartupChangelogMode.get(settings);
+		if (cfgStartupQuiet.get(settings) || mode === "hidden") return;
+		const notes =
+			mode === "summary"
+				? new Text(
+						formatStartupChangelogSummary(selection).replace(/\/changelog(?: full)?/g, command =>
+							theme.bold(command),
+						),
+						1,
+						0,
+					)
+				: new Markdown(selection.markdown?.trim() ?? "", 1, 0, getMarkdownTheme());
+		this.#headerAfter = [
+			new DynamicBorder(),
+			new Text("What's New", 1, 0).setStyleFn(t => theme.bold(theme.fg("accent", t))),
+			new Spacer(1),
+			notes,
+			new Spacer(1),
+			new DynamicBorder(),
+		];
+		this.#syncHeaderExtras();
 	}
 
 	clearEditor(): void {
@@ -9752,6 +10025,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#btwController.handleFollowUp();
 	}
 
+	handleBtwInjectKey(): boolean {
+		return this.#btwController.handleInject();
+	}
+
 	async handleBtwBranch(
 		question: string,
 		assistantMessage: AssistantMessage,
@@ -9902,7 +10179,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestRender();
 	}
 
-	async reloadTodos(source: AgentSession = this.session): Promise<void> {
+	async reloadTodos(source: AgentViewSession = this.session): Promise<void> {
 		await this.#loadTodoList(source);
 		this.ui.requestRender();
 	}

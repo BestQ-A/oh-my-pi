@@ -369,6 +369,7 @@ describe("interactive /usage account visibility", () => {
 				modelRegistry: { authStorage },
 				fetchUsageReports,
 				getUsageReportingModelSelectors: () => [],
+				getAvailableModels: () => [],
 			},
 			ui: {
 				showOverlay: component => {

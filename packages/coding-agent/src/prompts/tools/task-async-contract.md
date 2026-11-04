@@ -1,5 +1,4 @@
 Results auto-deliver; NEVER poll.{{#if waitTool}} Completely blocked? Call `wait` to receive the first settled job you started.{{/if}}
-{{#if ircEnabled}}Coordinate while peers run via `write agent://<id>` (or `agent://all` to broadcast).{{/if}}
 
 `read proc://` lists jobs/services; `read proc://<id>` inspects status/output without consuming delivery; `read proc://<id>/model` inspects a subagent's active model. `write proc://<id>/model` with `<model>`{{#if ircEnabled}} (or `write agent://<id>?model=<model>` with optional steering instructions){{/if}} switches a running, failed, or parked subagent's model mid-flight and continues without losing progress. `write proc://<id>/kill` cancels/stops; omit `content`.
 

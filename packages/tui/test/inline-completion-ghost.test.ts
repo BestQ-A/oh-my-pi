@@ -217,7 +217,7 @@ describe("Numbered empty-composer prediction menu (1. 内容1  2. 内容2  3. �
 		const theme = { ...defaultEditorTheme, hintStyle: (s: string) => `<<${s}>>` };
 		const editor = new Editor(theme);
 		editor.setPaddingX(0);
-		editor.prediction = () => "1. 提交当前改动  2. 查看 git diff  3. 继续优化补全延迟";
+		editor.predictions = () => ["1. 提交当前改动  2. 查看 git diff  3. 继续优化补全延迟"];
 
 		// 1) Empty box renders the full numbered menu; pressing Tab selects all items by default
 		expect(Bun.stripANSI(editor.render(100)[1] ?? "")).toContain(
