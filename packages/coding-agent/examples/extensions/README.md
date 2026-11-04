@@ -72,7 +72,16 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 Load `web-chat/extension.ts` with `omp -e` or create a source-linked extension
 that re-exports its default factory. Keep the whole `web-chat` directory together;
 the runtime loads its sibling browser adapters. Requires `ego-browser` on PATH
-and website login in Ego Lite. API credentials are not used by this extension.
+and website login in Ego Lite. Keep the Ego window restored while running:
+Gemini may defer rendering its answer while the window is minimized.
+API credentials are not used by this extension.
+
+To pin Gemini to one signed-in Google account, call the factory from your local
+extension as `webChatExtension(pi, { geminiAccount: { email: "you@example.com", index: 1 } })`.
+The index is the account slot in its `/u/1/app` URL. The runner keeps that slot in
+home and conversation URLs and verifies the visible email before editing or
+sending. A missing, ambiguous, or different account returns `account_mismatch`;
+it never falls back to another Google account if slots change after login.
 
 Both tools accept these calls:
 
@@ -81,8 +90,8 @@ Both tools accept these calls:
 {"action":"ask","prompt":"Review this proposed API: ...","timeout":120}
 ```
 
-Results contain `status`, `url`, and, after an answer, `text`. Visible model/plan
-labels and limit messages are included when available. Website labels such as
+Results contain `status`, `url`, and, after an answer, `text`. Visible account
+emails, model/plan labels, and limit messages are included when available. Website labels such as
 `Pro` or `Thinking` do not identify an API model. Numeric remaining quota is not
 inferred. To continue, pass the returned URL as `conversationUrl` on the next ask;
 omitting it starts a new chat. Only the supplied prompt is sent, without automatic
@@ -91,6 +100,10 @@ session/repository context. Answers are ordinary untrusted tool results.
 Each extension session owns one browser TaskSpace and serializes operations.
 `status` is a read-tier tool operation; `ask` uses the exec tier. The default
 deadline is 120 seconds (1–600 accepted). A send is never retried automatically.
+The same deadline covers queue wait, guide loading, and browser startup. After
+that cutoff, the runner allows one second for the child's final result before
+forcing process cleanup. Active cancellation waits for subprocess cleanup and
+returns the known TaskSpace/Page; cancellation while queued returns immediately.
 Login, visible rate limits, cancellation, and timeout are surfaced explicitly;
 inspect the returned conversation before resubmitting after an uncertain send.
 User takeover stops automation. After login/control recovery, reload the
