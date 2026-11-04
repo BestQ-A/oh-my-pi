@@ -1,11 +1,11 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import description from "./description.md" with { type: "text" };
-import { WebChatRunner, type WebChatProvider } from "./runtime";
+import { WebChatRunner, type WebChatProvider, type WebChatRunnerOptions } from "./runtime";
 
 /** Logged-in website UI tools; only the supplied prompt is sent to the selected site. */
-export default function webChatExtension(pi: ExtensionAPI) {
+export default function webChatExtension(pi: ExtensionAPI, options: Pick<WebChatRunnerOptions, "geminiAccount"> = {}) {
 	const z = pi.zod;
-	const runner = new WebChatRunner();
+	const runner = new WebChatRunner(options);
 	for (const provider of ["chatgpt", "gemini"] satisfies WebChatProvider[]) {
 		const label = provider === "chatgpt" ? "ChatGPT Web" : "Gemini Web";
 		pi.registerTool({
@@ -32,7 +32,7 @@ export default function webChatExtension(pi: ExtensionAPI) {
 					.max(600)
 					.optional()
 					.describe(
-						"Total timeout in seconds including browser queue wait; defaults to 120. An uncertain send is never retried.",
+						"Browser-work timeout in seconds including queue wait and startup; defaults to 120. Active cancellation waits for cleanup. An uncertain send is never retried.",
 					),
 			}),
 			async execute(_toolCallId, params, signal) {

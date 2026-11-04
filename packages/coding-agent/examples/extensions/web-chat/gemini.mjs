@@ -19,6 +19,18 @@ async function observe(page, pending) {
 			const normalizeText = text => (text ?? "").replace(/\s+/gu, " ").trim();
 			const editors = [...document.querySelectorAll(editorSelector)].filter(visible);
 			const editor = editors[0];
+			const accounts = new Set(
+				[...document.querySelectorAll('a[gem-open-account-menu][aria-label^="Google Account:"]')]
+					.filter(visible)
+					.map(element =>
+						element
+							.getAttribute("aria-label")
+							.match(/\(([^()\s]+@[^()\s]+)\)\s*$/u)?.[1]
+							?.toLowerCase(),
+					)
+					.filter(Boolean),
+			);
+			const account = accounts.size === 1 ? [...accounts][0] : undefined;
 			const mode = [...document.querySelectorAll('button[data-test-id="bard-mode-menu-button"]')].find(visible);
 			const modeLabel = mode?.getAttribute("aria-label") ?? "";
 			const model = modeLabel.startsWith("Open mode picker, currently ")
@@ -83,8 +95,10 @@ async function observe(page, pending) {
 				const previousResponses = new Set(pending.responseIds);
 				for (const turn of document.querySelectorAll(".conversation-container[id]")) {
 					if (previousTurns.has(turn.id)) continue;
-					const query = turn.querySelector("user-query .query-text");
-					if (normalizeText(query?.innerText) !== pending.prompt) continue;
+					const query = [...turn.querySelectorAll("user-query .query-text-line")]
+						.map(line => line.innerText)
+						.join("\n");
+					if (normalizeText(query) !== pending.prompt) continue;
 					const response = turn.querySelector("model-response");
 					const content = response?.querySelector("message-content[id]");
 					if (!content?.id || previousResponses.has(content.id)) continue;
@@ -97,6 +111,7 @@ async function observe(page, pending) {
 			}
 			return {
 				url: location.href,
+				account,
 				model,
 				plan,
 				message,
@@ -120,8 +135,21 @@ function result(state, status, message, text) {
 		url: state.url,
 		...(state.model ? { model: state.model } : {}),
 		...(state.plan ? { plan: state.plan } : {}),
+		...(state.account ? { account: state.account } : {}),
 		...(text === undefined ? {} : { text }),
 		...(message || state.message ? { message: [message, state.message].filter(Boolean).join("\n") } : {}),
+	};
+}
+
+function accountError(state, expected) {
+	if (!expected || state.account === expected) return undefined;
+	return {
+		...result(
+			state,
+			"error",
+			`Gemini account is ${state.account ?? "unavailable or ambiguous"}; expected ${expected}. Check the configured Google account slot before continuing.`,
+		),
+		reason: "account_mismatch",
 	};
 }
 
@@ -137,11 +165,17 @@ export async function runGemini(page, request) {
 	const deadline = Date.now() + timeoutMs;
 	let state = await observe(page, null);
 	const readyDeadline = Math.min(deadline, Date.now() + 10_000);
-	while (!state.status && state.editorCount === 0 && Date.now() < readyDeadline) {
+	while (
+		!state.status &&
+		(state.editorCount === 0 || (request.expectedAccount && !state.account)) &&
+		Date.now() < readyDeadline
+	) {
 		await delay(Math.min(300, readyDeadline - Date.now()));
 		state = await observe(page, null);
 	}
 	if (state.status) return result(state, state.status);
+	let accountFailure = accountError(state, request.expectedAccount);
+	if (accountFailure) return accountFailure;
 	if (state.editorCount !== 1 || !state.editorEnabled) {
 		return result(
 			state,
@@ -180,6 +214,8 @@ export async function runGemini(page, request) {
 	await page.fill(EDITOR, request.prompt);
 	state = await observe(page, null);
 	if (state.status) return result(state, state.status);
+	accountFailure = accountError(state, request.expectedAccount);
+	if (accountFailure) return accountFailure;
 	if (state.editorCount !== 1 || !state.editorEnabled || normalize(state.draft) !== pending.prompt) {
 		return result(state, "error", "Gemini's editor did not contain the requested prompt; no send was attempted.");
 	}
@@ -191,6 +227,8 @@ export async function runGemini(page, request) {
 	while (Date.now() < deadline) {
 		state = await observe(page, pending);
 		if (state.status) return result(state, state.status);
+		accountFailure = accountError(state, request.expectedAccount);
+		if (accountFailure) return accountFailure;
 		if (state.answer) {
 			// Require the completion marker and identical fresh text across two observations.
 			if (completed?.id === state.answer.id && completed.text === state.answer.text) {

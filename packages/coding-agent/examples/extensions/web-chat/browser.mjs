@@ -10,6 +10,8 @@ function emit(record) {
 }
 
 function errorReason(error) {
+	if (error?.name === "TimeoutError") return "timeout";
+	if (error?.name === "AbortError") return "cancelled";
 	const message = `${error?.code ?? ""} ${error?.message ?? error}`;
 	return /EGO_\S*(?:CONTROL|OWNERSHIP|INACTIVE|UNASSIGNED|NOT_ASSIGNED|NOT_OWNED)|user.{0,30}control|space.{0,30}(?:inactive|unassigned|user.owned)/i.test(
 		message,
@@ -23,8 +25,8 @@ export async function runBrowser(input) {
 	let task;
 	let page;
 	let context;
-	const timeoutMs = input.request?.timeoutMs ?? 15000;
-	const deadline = Date.now() + timeoutMs;
+	const deadline = input.deadline;
+	const timeoutMs = Math.max(0, deadline - Date.now());
 	const watchdog = setTimeout(() => {
 		emit({
 			kind: "result",
@@ -38,7 +40,7 @@ export async function runBrowser(input) {
 			},
 		});
 		process.exit(124);
-	}, timeoutMs + 1000);
+	}, timeoutMs);
 	let checking = false;
 	const cancellation = setInterval(async () => {
 		if (checking) return;
@@ -62,7 +64,13 @@ export async function runBrowser(input) {
 		}
 	}, 200);
 	try {
-		if ((await fs.readFile(input.controlPath, "utf8")) !== "active") throw new Error("Browser operation cancelled");
+		if ((await fs.readFile(input.controlPath, "utf8")) !== "active")
+			throw new DOMException("Browser operation cancelled", "AbortError");
+		if (Date.now() >= deadline)
+			throw new DOMException(
+				"Browser deadline exceeded before browser execution; no prompt was submitted.",
+				"TimeoutError",
+			);
 		task = await taskSpace(input.spaceId ?? input.spaceName);
 		context = { spaceId: task.spaceId, pages: { ...input.pages } };
 		emit({ kind: "context", context });
@@ -99,11 +107,22 @@ export async function runBrowser(input) {
 		}
 		emit({ kind: "context", context });
 		await page.goto(input.request.conversationUrl ?? HOME[input.provider]);
-		if (Date.now() >= deadline || (await fs.readFile(input.controlPath, "utf8")) !== "active") {
-			throw new Error("Browser deadline or cancellation reached before adapter execution. No prompt was submitted.");
-		}
+		if (Date.now() >= deadline)
+			throw new DOMException(
+				"Browser deadline exceeded before adapter execution; no prompt was submitted.",
+				"TimeoutError",
+			);
+		if ((await fs.readFile(input.controlPath, "utf8")) !== "active")
+			throw new DOMException(
+				"Browser operation cancelled before adapter execution; no prompt was submitted.",
+				"AbortError",
+			);
 		const adapter = input.provider === "chatgpt" ? runChatGPT : runGemini;
-		const result = await adapter(page, { ...input.request, timeoutMs: Math.max(1, deadline - Date.now()) });
+		const result = await adapter(page, {
+			...input.request,
+			expectedAccount: input.provider === "gemini" ? input.geminiAccount : undefined,
+			timeoutMs: Math.max(1, deadline - Date.now()),
+		});
 		// External TaskSpaces always remain under the caller's lifecycle ownership.
 		if (!input.external && result.status === "login_required") await task.handOff();
 		emit({ kind: "result", context, result });
