@@ -23,7 +23,7 @@ import { extractSessionInit } from "../session/session-manager";
 import { collectSubSessions } from "../session/sub-sessions";
 import type { EventBus } from "../utils/event-bus";
 import { resolveMaxRuntimeMs, runSubagentFollowUpTurn, softRequestBudgetFor } from "./executor";
-import { persistedAgentDefinition } from "./persisted-revive";
+import { persistedAgentDefinition, persistedAgentName } from "./persisted-revive";
 import { formatTaskResultSummary } from "./result-summary";
 import { cfgTaskAgentMaxRuntimeMs, cfgTaskMaxRuntimeMs } from "./settings";
 
@@ -81,6 +81,7 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 			continue;
 		}
 		const sessionFileOfRef = ref.sessionFile;
+		const agentName = persistedAgentName(ref.displayName, init);
 		const structured = init.tools.includes("yield");
 		manager.register(
 			"task",
@@ -100,11 +101,11 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 					subagentEventBus: options.subagentEventBus,
 					artifactsDir: path.dirname(sessionFileOfRef),
 					maxRuntimeMs: resolveMaxRuntimeMs(
-						init.agent ?? ref.displayName,
+						agentName,
 						cfgTaskMaxRuntimeMs.get(session.settings),
 						cfgTaskAgentMaxRuntimeMs.get(session.settings),
 					),
-					...softRequestBudgetFor(ref.displayName, session.settings),
+					...softRequestBudgetFor(agentName, session.settings),
 				});
 				const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
 				const structuredOutput = result.structuredOutput;
