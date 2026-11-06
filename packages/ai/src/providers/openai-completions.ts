@@ -1861,10 +1861,34 @@ const streamOpenAICompletionsOnce = (
 				);
 			}
 			if (output.stopReason === "error") {
-				throw new AIError.ProviderResponseError(output.errorMessage || "Provider returned an error stop reason", {
-					provider: model.provider,
-					kind: "runtime",
-				});
+				// OpenCode-Go / Gemini proxy quirk: when Gemini 4 Argon decides to make 0 tool calls
+				// on an advisor silent turn, it sometimes emits literal `"[]"` (empty tool array) and
+				// the upstream proxy maps Gemini's termination to `finish_reason: "content_filter"`.
+				// Treat a pure `"[]"` text completion with no tool calls as a clean silent `stop`.
+				const onlyText = output.content
+					.filter((b): b is TextContent => b.type === "text")
+					.map(b => b.text)
+					.join("")
+					.trim();
+				const resolvedCompat = policy.compat as ResolvedOpenAICompat;
+				if (
+					resolvedCompat.geminiEmptyToolArrayWorkaround &&
+					Boolean(context.tools?.length) &&
+					output.errorMessage === "Provider finish_reason: content_filter" &&
+					onlyText === "[]" &&
+					!output.content.some(b => b.type === "toolCall")
+				) {
+					output.stopReason = "stop";
+					output.errorMessage = undefined;
+				} else {
+					throw new AIError.ProviderResponseError(
+						output.errorMessage || "Provider returned an error stop reason",
+						{
+							provider: model.provider,
+							kind: "runtime",
+						},
+					);
+				}
 			}
 
 			output.errorMessage = undefined;
@@ -2611,12 +2635,20 @@ export function convertMessages(
 				// of the visible answer. Insert a paragraph break after them — only
 				// when another block actually follows, so a trailing demoted block
 				// never ships trailing whitespace.
-				assistantMsg.content = nonEmptyTextBlocks
+				const joinedText = nonEmptyTextBlocks
 					.map((b, i) => {
 						const text = b.text.toWellFormed();
 						return isDemotedThinking(b) && i < nonEmptyTextBlocks.length - 1 ? `${text}\n` : text;
 					})
 					.join("");
+				// Prevent literal `"[]"` 0-tool assistant turns from poisoning Gemini's function-calling decoder on replay
+				assistantMsg.content =
+					compat.geminiEmptyToolArrayWorkaround &&
+					Boolean(context.tools?.length) &&
+					!msg.content.some(b => b.type === "toolCall") &&
+					joinedText.trim() === "[]"
+						? "OK."
+						: joinedText;
 			}
 
 			// Handle thinking blocks

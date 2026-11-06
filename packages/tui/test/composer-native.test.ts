@@ -4,7 +4,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Container, Text } from "@oh-my-pi/pi-tui";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
-import { describeWorkingRow, type WorkingRowSpec } from "@oh-my-pi/pi-tui/components/loader";
+import { describeWorkingRow, Loader, type WorkingRowSpec } from "@oh-my-pi/pi-tui/components/loader";
 import { SelectList } from "@oh-my-pi/pi-tui/components/select-list";
 import type { DescribeContext, NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
@@ -449,6 +449,43 @@ describe("native working row", () => {
 			"fill",
 			"stop",
 		]);
+	});
+
+	it("wraps an intent that does not fit the row instead of ellipsizing it", () => {
+		const label = "Reading the full configuration and the nested workspace manifests before editing";
+		const row = describeWorkingRow({ label, startedAt: 0, interruptKey: "escape" }, { ...cx, cols: 40 }, 10);
+		const text = nodes(row).find(n => n.key === "label");
+		expect(text?.k).toBe("text");
+		expect(text?.p).toMatchObject({ wrap: "word", role: "omp.working.label" });
+		expect(text?.p).toMatchObject({ spans: [{ t: label }] });
+		expect(byRole(row, "omp.working.stop")).toBeDefined();
+	});
+
+	it("re-describes a cached Loader working row between inline and wrapped across terminal resizes", () => {
+		const label = "Reading the full configuration and the nested workspace manifests before editing";
+		const loader = new Loader(
+			{ requestComponentRender() {} } as never,
+			s => s,
+			s => s,
+		);
+		try {
+			loader.setWorkingRow(
+				() => ({ label, startedAt: 0, interruptKey: "escape" }),
+				() => {},
+			);
+			const wide = loader.describe({ ...cx, cols: 160 });
+			expect(wide.k).toBe("row");
+			const narrow = loader.describe({ ...cx, cols: 40 });
+			expect(narrow.k).toBe("col");
+			expect(nodes(narrow).find(n => n.key === "label")?.p).toMatchObject({
+				wrap: "word",
+				role: "omp.working.label",
+			});
+			const widened = loader.describe({ ...cx, cols: 160 });
+			expect(widened.k).toBe("row");
+		} finally {
+			loader.stop();
+		}
 	});
 
 	it("shows indeterminate progress while compacting and no stop control when Esc would not cancel", () => {

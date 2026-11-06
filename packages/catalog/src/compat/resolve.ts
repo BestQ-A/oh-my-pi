@@ -548,6 +548,7 @@ function detectOpenAICompat(
 		thinkingKeep: usesMoonshotKimiPreservedThinking ? "all" : undefined,
 		reasoningContentField: "reasoning_content",
 		mistralReasoningContentParts: undefined,
+		geminiEmptyToolArrayWorkaround: facts.is("gemini") || /\bgemini\b/i.test(spec.name ?? "") || undefined,
 		requiresReasoningContentForToolCalls:
 			(facts.is("kimi") && !d.isOpenCodeProvider) ||
 			(isDeepseekFamily && reasoningCapable) ||

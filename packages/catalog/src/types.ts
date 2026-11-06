@@ -356,6 +356,8 @@ export interface OpenAICompat {
 	reasoningContentField?: "reasoning_content" | "reasoning" | "reasoning_text";
 	/** Decode Mistral thinking parts in streamed content and replay them as typed assistant content. */
 	mistralReasoningContentParts?: boolean;
+	/** Normalize Gemini OpenAI-compat proxy empty-tool `"[]"` content_filter stops and `"[]"` replay turns. */
+	geminiEmptyToolArrayWorkaround?: boolean;
 	/** Whether assistant tool-call messages must include reasoning content. Default: false. */
 	requiresReasoningContentForToolCalls?: boolean;
 	/** Whether all assistant messages must include reasoning content. Default: false. */
@@ -975,6 +977,7 @@ export interface ResolvedOpenAISharedCompat {
 	supportsNamedToolChoice: boolean;
 	reasoningContentField?: OpenAICompat["reasoningContentField"];
 	mistralReasoningContentParts?: boolean;
+	geminiEmptyToolArrayWorkaround?: boolean;
 	requiresReasoningContentForToolCalls: boolean;
 	requiresReasoningContentForAllAssistantTurns: boolean;
 	allowsSyntheticReasoningContentForToolCalls: boolean;
@@ -1059,6 +1062,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "supportsNamedToolChoice"
 			| "reasoningContentField"
 			| "mistralReasoningContentParts"
+			| "geminiEmptyToolArrayWorkaround"
 			| "requiresReasoningContentForToolCalls"
 			| "requiresReasoningContentForAllAssistantTurns"
 			| "allowsSyntheticReasoningContentForToolCalls"
