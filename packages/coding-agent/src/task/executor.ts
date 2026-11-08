@@ -2718,7 +2718,6 @@ async function driveSessionToResult(
 				}
 				const recoverableStop = monitor.budgetStopRequested() || monitor.yieldTurnStopRequested();
 				if (!recoverableStop || abortSignal.aborted || endsRun(err)) throw err;
-				return;
 			}
 			// send + idle settled cleanly, but a handoff may still have restarted
 			// the turn mid-flight: retry only when the turn left no trace,
@@ -2826,7 +2825,7 @@ async function driveSessionToResult(
 						await awaitAbortable(session.waitForIdle());
 						continue;
 					}
-					if (err instanceof PromptDispatchError) throw err;
+					if (endsRun(err)) throw err;
 					if (abortSignal.aborted || err instanceof ToolAbortError) {
 						logger.debug("Subagent prompt aborted");
 					} else {
