@@ -5778,8 +5778,11 @@ export class Editor implements Component, Focusable {
 	 */
 	#resolvePredictionAction(): (ResolvedPredictionAction & { index?: number }) | null {
 		if (this.#autocompleteState) return null;
-		const predictions = this.predictions?.();
-		if (!predictions?.length) return null;
+		const arr = this.predictions?.();
+		if (arr !== undefined && arr.length === 0) return null;
+		const scalar = arr === undefined ? this.prediction?.() : undefined;
+		const predictions = arr ?? (scalar !== undefined ? [scalar] : undefined);
+		if (!predictions) return null;
 		const { lines, cursorCol } = this.#state;
 		if (lines.length !== 1) return null;
 		const typed = lines[0] ?? "";
