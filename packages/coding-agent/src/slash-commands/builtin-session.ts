@@ -73,6 +73,17 @@ const HUD_SUBCOMMANDS: Record<string, true> = {
 	refresh: true,
 };
 
+function parseSubagentModelArgs(input: string) {
+	// A task name can be its agent ID. Consume quotes around only that argument
+	// so the optional continuation keeps its original spacing and punctuation.
+	const quotedId = /^\s*(['"])(.*?)\1(?=\s|$)/s.exec(input);
+	const { verb: agentId, rest: modelAndPrompt } = quotedId
+		? { verb: quotedId[2]!.trim(), rest: input.slice(quotedId[0].length) }
+		: parseSubcommand(input);
+	const { verb: modelSelector, rest: followUpPrompt } = parseSubcommand(modelAndPrompt);
+	return { agentId, modelSelector, followUpPrompt };
+}
+
 async function handleUsageResetCommand(
 	arg: string,
 	session: AgentSession,
@@ -385,8 +396,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				return commandConsumed();
 			}
 			if (verb === "model") {
-				const { verb: agentId, rest: modelAndPrompt } = parseSubcommand(rest);
-				const { verb: modelSelector, rest: followUpPrompt } = parseSubcommand(modelAndPrompt);
+				const { agentId, modelSelector, followUpPrompt } = parseSubagentModelArgs(rest);
 				if (!agentId || !modelSelector) {
 					return usage("Usage: /jobs model <subagent-id> <model> [prompt...]", runtime);
 				}
@@ -453,8 +463,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			if (verb === "kill") {
 				await handleJobsKillCommand(rest, runtime.ctx.session, text => runtime.ctx.showStatus(text));
 			} else if (verb === "model") {
-				const { verb: agentId, rest: modelAndPrompt } = parseSubcommand(rest);
-				const { verb: modelSelector, rest: followUpPrompt } = parseSubcommand(modelAndPrompt);
+				const { agentId, modelSelector, followUpPrompt } = parseSubagentModelArgs(rest);
 				if (!agentId) {
 					runtime.ctx.showStatus("Usage: /jobs model <subagent-id> [model] [prompt...]");
 				} else if (!modelSelector) {
@@ -502,8 +511,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		handle: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
 			const payload = verb === "model" || verb === "switch" ? rest : command.args;
-			const { verb: agentId, rest: modelAndPrompt } = parseSubcommand(payload);
-			const { verb: modelSelector, rest: followUpPrompt } = parseSubcommand(modelAndPrompt);
+			const { agentId, modelSelector, followUpPrompt } = parseSubagentModelArgs(payload);
 			if (!agentId || !modelSelector) {
 				return usage("Usage: /subagent [model] <subagent-id> <model> [prompt...]", runtime);
 			}
@@ -531,8 +539,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			}
 			const { verb, rest } = parseSubcommand(trimmed);
 			const payload = verb === "model" || verb === "switch" ? rest : trimmed;
-			const { verb: agentId, rest: modelAndPrompt } = parseSubcommand(payload);
-			const { verb: modelSelector, rest: followUpPrompt } = parseSubcommand(modelAndPrompt);
+			const { agentId, modelSelector, followUpPrompt } = parseSubagentModelArgs(payload);
 			if (!agentId) {
 				runtime.ctx.showStatus("Usage: /subagent [model] <subagent-id> [model] [prompt...]");
 				return;
