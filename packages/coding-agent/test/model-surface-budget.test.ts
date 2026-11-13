@@ -284,9 +284,10 @@ describe("model-facing role surface budgets", () => {
 			expect(task.description, `task description must document ${key}`).toContain(`\`${key}\``);
 		}
 		const inputsSection = task.description.split(/^# Inputs\b/m)[1]?.split(/^# Available Agents\b/m)[0] ?? "";
-		const documented = [...inputsSection.matchAll(/(?:^|\n)\s*`([A-Za-z][A-Za-z0-9_]*)`\s*:/g)].map(
-			match => match[1]!,
-		);
+		// Inputs are a bullet list (`- \`key\`: …`), optionally nested, though a bare `\`key\`: …` line is also accepted.
+		const documented = [
+			...inputsSection.matchAll(/(?:^|\n)\s*(?:[-*+]|\d+[.)])?\s*`([A-Za-z][A-Za-z0-9_]*)`\s*:/g),
+		].map(match => match[1]!);
 		expect(documented.length).toBeGreaterThan(0);
 		for (const key of documented) {
 			expect({ ...root, ...live }, `task documents stale parameter ${key}`).toHaveProperty(key);

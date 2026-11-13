@@ -375,10 +375,14 @@ describe("ComposerMarginHudFrame", () => {
 			const topPlain = stripCursorAndAnsi(topBar);
 			const topLabels = extensionLinkLabels(topBar);
 			const presetSpan = spanOf(topPlain, "▲ Preset: burn_expiring_gemini");
+			// The "⚡智选" auto-quota chip is glued to the preset cell, leading space included:
+			// it starts where the preset span ends (col 30) and is 7 cells wide -> [30, 37).
+			const quotaAutoSpan = spanOf(topPlain, " ⚡智选");
 			const hwSpan = spanOf(topPlain, "RTX 3090 2.7/24.0G 51°C · CPU 14% · RAM 18.2/64.0G");
 			const quotaSpan = spanOf(topPlain, "🔥 临期: AG 28%/2h");
 			expect(topLabels.map(l => ({ url: l.url, start: l.start, end: l.end }))).toEqual([
 				{ url: "omp-ui:quota", ...presetSpan },
+				{ url: "omp-ui:quota-auto", ...quotaAutoSpan },
 				{ url: "omp-ui:hud-refresh", ...hwSpan },
 				{ url: "omp-ui:quota", ...quotaSpan },
 			]);
