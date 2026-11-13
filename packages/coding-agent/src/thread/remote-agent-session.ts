@@ -75,6 +75,8 @@ import type {
 	RoleModelCycleResult,
 	SessionStats,
 	SteerOptions,
+	SwitchModelAndContinueOptions,
+	SwitchModelAndContinueResult,
 } from "../session/agent-session-types";
 import {
 	asyncJobSnapshot,
@@ -827,6 +829,14 @@ export class RemoteAgentSession implements AgentViewSession {
 
 	prompt(text: string, options?: PromptOptions): Promise<boolean> {
 		return this.#command("prompt", text, options);
+	}
+
+	/** The model switch runs on the home worker; its own registry resolves the wire model data. */
+	switchModelAndContinue(
+		model: Model,
+		options?: SwitchModelAndContinueOptions,
+	): Promise<SwitchModelAndContinueResult> {
+		return this.#command("switchModelAndContinue", toWireData(model), options);
 	}
 
 	steer(text: string, images?: ImageContent[], options?: SteerOptions): Promise<void> {

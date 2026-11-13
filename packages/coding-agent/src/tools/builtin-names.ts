@@ -74,6 +74,11 @@ export const BUILTIN_TOOL_HELP: Record<BuiltinToolName, BuiltinToolHelp> = {
 		defaultState: "detected",
 		detectedWhen: "IDA Pro is installed",
 	},
+	composer: {
+		summary: "Read, edit, or submit the interactive input draft",
+		defaultState: "detected",
+		detectedWhen: "an interactive TUI session runs at the top level",
+	},
 	ast_grep: { summary: "Search code with AST patterns", defaultState: "off" },
 	github: { summary: "Query and act on GitHub repositories, issues, and PRs", defaultState: "off" },
 	checkpoint: { summary: "Save a git-based checkpoint of session state", defaultState: "off" },

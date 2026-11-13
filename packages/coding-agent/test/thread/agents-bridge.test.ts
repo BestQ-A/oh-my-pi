@@ -264,4 +264,27 @@ describe("agent bridging across subagent workers", () => {
 		expect(liveRef("W1").status).toBe("idle");
 		expect(worker.load).toBe(1);
 	});
+
+	it("switches a worker-homed session's model through its main-thread mirror", async () => {
+		const { probe } = await startWorker();
+		const key = await probe.open("W1", {});
+		const remote = mirrorOf(liveRef("W1").session);
+		expect(remote.instanceKey).toBe(key);
+		expect(remote.model?.id).toBe("claude-sonnet-4-5");
+
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const target = new ModelRegistry(authStorage)
+			.getAvailable()
+			.find(model => model.provider === "anthropic" && model.id !== "claude-sonnet-4-5");
+		authStorage.close();
+		if (!target) throw new Error("no second bundled anthropic model");
+
+		// Main holds no session of its own here: the command carries the model data and the
+		// worker re-resolves it against its registry, then reports the outcome back.
+		const outcome = await remote.switchModelAndContinue(target, {});
+		expect(outcome.previousModel).toBe("anthropic/claude-sonnet-4-5");
+		expect(outcome.model).toBe(`anthropic/${target.id}`);
+		await waitFor(() => remote.model?.id === target.id);
+	});
 });

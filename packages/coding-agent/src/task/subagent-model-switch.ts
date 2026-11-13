@@ -4,17 +4,24 @@ import { formatModelString, getModelMatchPreferences, resolveCliModel } from "..
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import { executeSend, isIrcEnabled } from "../irc/messaging";
-import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry, type AgentStatus, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentLifecycleManager, type AgentLifecycleApi } from "../registry/agent-lifecycle";
+import {
+	type AgentRef,
+	AgentRegistry,
+	type AgentRegistryApi,
+	type AgentStatus,
+	MAIN_AGENT_ID,
+} from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
-import type { AgentSession, SwitchModelAndContinueResult } from "../session/agent-session";
+import type { SwitchModelAndContinueResult } from "../session/agent-session";
+import { type AgentSessionHandle, isAgentViewSession, isLocalAgentSession } from "../session/agent-session-handle";
 import type { ToolSession } from "../tools";
 
 export interface SubagentModelCallerContext {
 	settings: Settings;
 	modelRegistry?: ModelRegistry;
-	agentRegistry?: AgentRegistry;
-	agentLifecycle?: () => AgentLifecycleManager;
+	agentRegistry?: AgentRegistryApi;
+	agentLifecycle?: () => AgentLifecycleApi;
 	asyncJobManager?: ToolSession["asyncJobManager"];
 	getAgentId?: () => string | null | undefined;
 	getSessionFile?: () => string | null | undefined;
@@ -64,11 +71,11 @@ export interface SubagentModelSwitchResult extends SwitchModelAndContinueResult 
 const DEFAULT_SETTLED_CONTINUE_PROMPT =
 	"Your model has been switched. Review your progress so far and continue any remaining work.";
 
-function getRegistry(caller: SubagentModelCallerContext): AgentRegistry {
+function getRegistry(caller: SubagentModelCallerContext): AgentRegistryApi {
 	return caller.agentRegistry ?? AgentRegistry.global();
 }
 
-function getLifecycle(caller: SubagentModelCallerContext): AgentLifecycleManager {
+function getLifecycle(caller: SubagentModelCallerContext): AgentLifecycleApi {
 	return caller.agentLifecycle?.() ?? AgentLifecycleManager.global();
 }
 
@@ -134,7 +141,12 @@ export async function inspectSubagentModel(
 	const ref = await resolveSubagentTargetRef(caller, targetId);
 	const liveSession = ref.session;
 	const model = liveSession?.model ? formatModelString(liveSession.model) : ref.history?.resolvedModel;
-	const thinkingLevel = liveSession?.configuredThinkingLevel();
+	// A view session reports its configured level (`auto` included); a plain handle reports the effective one.
+	const thinkingLevel = liveSession
+		? isAgentViewSession(liveSession)
+			? liveSession.configuredThinkingLevel()
+			: liveSession.thinkingLevel
+		: undefined;
 	return {
 		id: ref.id,
 		status: ref.status,
@@ -147,13 +159,15 @@ export async function inspectSubagentModel(
 function resolveRequestedModel(
 	selector: string,
 	caller: SubagentModelCallerContext,
-	subSession?: AgentSession | null,
+	subSession?: AgentSessionHandle | null,
 ): { model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel; warning?: string } {
 	const trimmed = selector.trim();
 	if (!trimmed) {
 		throw new Error("Model selector is required (e.g. provider/model, fuzzy model id, or @role).");
 	}
-	const modelRegistry = subSession?.modelRegistry ?? caller.modelRegistry;
+	// Only a session homed here owns a registry the caller may resolve against.
+	const modelRegistry =
+		subSession && isLocalAgentSession(subSession) ? subSession.modelRegistry : caller.modelRegistry;
 	if (!modelRegistry) {
 		throw new Error("Model registry is unavailable in this session.");
 	}
@@ -199,7 +213,6 @@ export async function switchSubagentModel(options: SwitchSubagentModelOptions): 
 	const revived = ref.session === null;
 	const subSession = ref.session ?? (await getLifecycle(caller).ensureLive(ref.id));
 
-	// Re-resolve against subSession.modelRegistry only if caller had no modelRegistry earlier
 	const outcome = await subSession.switchModelAndContinue(targetModel, {
 		thinkingLevel: targetThinking,
 		interruptTools: options.interruptTools,

@@ -549,6 +549,13 @@ function localModel(session: AgentSession, model: Model): Model {
 /** Worker-side implementation of {@link SessionHostProtocol}; commands flush state before their result posts. */
 export const SESSION_HOST_SERVE: RpcServe<SessionPublisher, SessionHostProtocol> = {
 	prompt: async (publisher, text, options) => settle(publisher, publisher.session.prompt(text, options)),
+	switchModelAndContinue: async (publisher, model, options) =>
+		toWireData(
+			await settle(
+				publisher,
+				publisher.session.switchModelAndContinue(localModel(publisher.session, model), options),
+			),
+		),
 	steer: async (publisher, text, images, options) => settle(publisher, publisher.session.steer(text, images, options)),
 	abort: async (publisher, options) => settle(publisher, publisher.session.abort(options)),
 	dispose: async (publisher, options) => settle(publisher, publisher.session.dispose(options)),

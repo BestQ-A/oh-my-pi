@@ -179,7 +179,7 @@ describe("status line model segment compact thinking level", () => {
 			name: "Gemini 4 Argon",
 			provider: "google-antigravity",
 			thinking: true,
-		} as SegmentContext["session"]["state"]["model"];
+		} as unknown as SegmentContext["session"]["state"]["model"];
 		expect(Bun.stripANSI(renderSegment("model", ctx).content)).toContain("google-antigravity/Gemini 4 Argon");
 
 		ctx.options = { model: { showProvider: false } };

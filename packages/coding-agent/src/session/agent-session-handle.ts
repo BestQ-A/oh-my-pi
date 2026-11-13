@@ -43,6 +43,8 @@ import type {
 	RoleModelCycleResult,
 	SessionStats,
 	SteerOptions,
+	SwitchModelAndContinueOptions,
+	SwitchModelAndContinueResult,
 } from "./agent-session-types";
 import type { BlobPutOptions, BlobPutResult } from "./blob-store";
 import type { IdleMaintenanceOptions } from "./idle-maintenance";
@@ -142,6 +144,13 @@ export interface AgentSessionHandle {
 	waitForIrcReplies(): Promise<void>;
 	/** Send a prompt (or steer/follow up while streaming, per `options.streamingBehavior`). */
 	prompt(text: string, options?: PromptOptions): Promise<boolean>;
+	/**
+	 * Switch the session onto `model` and continue without losing progress: an
+	 * in-flight LLM stream or retry backoff is aborted and resumed on the new
+	 * model, active local tool calls keep running (unless `options.interruptTools`)
+	 * so their result feeds the next turn, and an idle interrupted tail is retried.
+	 */
+	switchModelAndContinue(model: Model, options?: SwitchModelAndContinueOptions): Promise<SwitchModelAndContinueResult>;
 	/** Queue a steering message for the next step boundary. */
 	steer(text: string, images?: ImageContent[], options?: SteerOptions): Promise<void>;
 	/** Abort the current operation and wait for the agent to become idle. */

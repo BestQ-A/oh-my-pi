@@ -26,6 +26,8 @@ import type {
 	PromptOptions,
 	SessionStats,
 	SteerOptions,
+	SwitchModelAndContinueOptions,
+	SwitchModelAndContinueResult,
 } from "../session/agent-session-types";
 import type { CustomMessage } from "../session/messages";
 import type { ServingModel } from "../session/retry-fallback-chains";
@@ -211,6 +213,14 @@ export class PeerAgentSession implements AgentSessionHandle {
 
 	prompt(text: string, options?: PromptOptions): Promise<boolean> {
 		return mainBridge().remote.call("prompt", this, text, options);
+	}
+
+	/** Main routes the switch to the session's home thread. */
+	switchModelAndContinue(
+		model: Model,
+		options?: SwitchModelAndContinueOptions,
+	): Promise<SwitchModelAndContinueResult> {
+		return mainBridge().remote.call("switchModelAndContinue", this, model, options);
 	}
 
 	steer(text: string, images?: ImageContent[], options?: SteerOptions): Promise<void> {
