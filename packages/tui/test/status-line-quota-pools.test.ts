@@ -522,17 +522,19 @@ describe("summarizeQuotaPoolCapsules", () => {
 });
 
 describe("quota_pools segment & presets", () => {
-	it("registers quota_pools in schema and deduplicates cache_read in full and nerd presets", () => {
+	it("registers quota_pools in schema and keeps it in the full and nerd presets", () => {
 		expect(STATUS_LINE_SEGMENT_IDS).toContain("quota_pools");
 		expect(STATUS_LINE_PRESETS.default.rightSegments).toContain("quota_pools");
 
-		expect(STATUS_LINE_PRESETS.full.rightSegments).not.toContain("cache_read");
-		const fullRateIdx = STATUS_LINE_PRESETS.full.rightSegments.indexOf("token_rate");
-		expect(STATUS_LINE_PRESETS.full.rightSegments[fullRateIdx + 1]).toBe("quota_pools");
+		// The fork dropped `cache_read` from `nerd` only; upstream still ships it in
+		// `full`, and both presets place `quota_pools` right after `cache`.
+		expect(STATUS_LINE_PRESETS.full.rightSegments).toContain("cache_read");
+		const fullCacheIdx = STATUS_LINE_PRESETS.full.rightSegments.indexOf("cache");
+		expect(STATUS_LINE_PRESETS.full.rightSegments[fullCacheIdx + 1]).toBe("quota_pools");
 
 		expect(STATUS_LINE_PRESETS.nerd.rightSegments).not.toContain("cache_read");
-		const nerdRateIdx = STATUS_LINE_PRESETS.nerd.rightSegments.indexOf("token_rate");
-		expect(STATUS_LINE_PRESETS.nerd.rightSegments[nerdRateIdx + 1]).toBe("quota_pools");
+		const nerdCacheIdx = STATUS_LINE_PRESETS.nerd.rightSegments.indexOf("cache");
+		expect(STATUS_LINE_PRESETS.nerd.rightSegments[nerdCacheIdx + 1]).toBe("quota_pools");
 	});
 
 	it("renders ANSI capsules and matching native TspSpan[] descriptions", () => {
